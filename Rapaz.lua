@@ -1,4 +1,4 @@
--- OBSIDIAN Pro — interface premium + círculo + trava de câmera suave + ESP (LocalScript)
+-- OBSIDIAN Pro v2.2 — trava persistente (LocalScript)
 -- Alvos: outros jogadores (respeita equipe) e NPCs com a tag "AuthorizedTarget".
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -25,20 +25,35 @@ local C = {
 }
 local GOTHAM, GOTHAM_B = Enum.Font.GothamMedium, Enum.Font.GothamBold
 
--- ═══ CONFIGURAÇÕES ═══
+-- ═══ CONFIGURAÇÕES (todas ajustáveis pela interface) ═══
 local S = {
 	Enabled = true, Lock = true, Auto = true, ShowFov = true,
-	Radius = 25,   -- círculo: % do menor lado da tela
-	Smooth = 60,   -- suavidade da câmera (%)
-	Tol = 24,      -- tolerância de saída (px)
-	MaxDist = 300, -- alcance de seleção (studs)
-	Team = true,
+	Radius = 25,      -- círculo: % do menor lado da tela
+	Smooth = 60,      -- suavidade da câmera (%)
+	Tol = 24,         -- tolerância de saída do círculo (px)
+	MaxDist = 300,    -- distância máxima (studs)
+	Team = true,      -- nunca selecionar aliados
+	WallCheck = true, -- exige linha de visão para NOVAS seleções
+	ObstructTol = 0.8,-- s de obstrução tolerados antes de soltar o alvo
+	MinSwitch = 1.5,  -- s mínimos entre trocas voluntárias (anti-oscilação)
+	AdvPct = 35,      -- % de vantagem angular exigida para troca antecipada
 	ESP = true, Box = true, Name = true, Dist = true, Health = true, Tracer = false,
 	EspDist = 500,
 	Hud = IS_TOUCH, HudScale = 100,
 }
 local DEFAULT = table.clone(S)
 local refresh = {} -- chave -> função que redesenha o controle
+
+-- Ajustes finos do sistema de seleção
+local TUNING = {
+	OutGrace = 0.2,       -- s fora de (círculo + tolerância) antes de soltar
+	RangeMargin = 1.05,   -- histerese do limite de distância (evita piscar na borda)
+	TieDeg = 0.25,        -- diferença angular (°) tratada como empate → desempata por distância física
+	AbsAdvDeg = 2.5,      -- vantagem angular mínima absoluta (°) para troca antecipada
+	BlockedPenalty = 10,  -- ° somados ao alvo atual quando está obstruído
+	OutsidePenalty = 5,   -- ° somados quando está fora do círculo (na faixa de tolerância)
+	LosInterval = 0.1,    -- s entre raycasts de visibilidade (cache por personagem)
+}
 
 -- ═══ LIMPEZA ═══
 pcall(function() RunService:UnbindFromRenderStep(STEP) end)
@@ -255,8 +270,9 @@ local function toggle(page, name, key, desc)
 	conn(row.Activated:Connect(function() S[key] = not S[key]; render() end))
 end
 
-local function slider(page, name, key, mn, mx, suffix)
-	suffix = suffix or ""
+local function slider(page, name, key, mn, mx, suffix, step)
+	suffix, step = suffix or "", step or 1
+	local fmt = (step % 1 == 0) and "%d" or "%.1f"
 	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 64), BackgroundColor3 = C.card, LayoutOrder = ord(page) }, page)
 	round(row, 12); stroke(row, C.line, 1, 0)
 	new("TextLabel", {
@@ -278,7 +294,7 @@ local function slider(page, name, key, mn, mx, suffix)
 		local a = (S[key] - mn) / (mx - mn)
 		fill.Size = UDim2.fromScale(a, 1)
 		knob.Position = UDim2.fromScale(a, 0.5)
-		chip.Text = S[key] .. suffix
+		chip.Text = string.format(fmt, S[key]) .. suffix
 	end
 	render()
 	refresh[key] = render
@@ -286,7 +302,8 @@ local function slider(page, name, key, mn, mx, suffix)
 	local act
 	local function set(x)
 		local a = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
-		S[key] = math.floor(mn + (mx - mn) * a + 0.5)
+		local v = math.floor((mn + (mx - mn) * a) / step + 0.5) * step
+		S[key] = math.clamp(math.floor(v * 1000 + 0.5) / 1000, mn, mx)
 		render()
 	end
 	conn(hit.InputBegan:Connect(function(i)
@@ -344,14 +361,147 @@ local function toast(msg)
 	end)
 end
 
--- ═══ AÇÕES (usadas pela janela e pelos botões na tela) ═══
-local target, lost, pick, holdOff = nil, 0, false, 0
-local weight, aim = 0, nil
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SISTEMA DE TRAVA PERSISTENTE — estado e critérios de troca
+-- ═══════════════════════════════════════════════════════════════════════════
+local target = nil          -- Model do alvo atual
+local outTime = 0           -- s fora de (círculo + tolerância)
+local blockTime = 0         -- s obstruído por parede/obstáculo
+local lastSwitch = -1e9     -- instante da última troca (anti-oscilação)
+local holdOff = 0           -- bloqueia seleção automática após "Limpar alvo"
+local pick = false          -- pedido de seleção manual
+local dropped = {}          -- model -> instante em que foi solto
+local weight, aim = 0, nil  -- trava de câmera (peso 0..1 e ponto de mira filtrado)
+local ctx = { camPos = Vector3.zero, now = 0 }
 
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.RespectCanCollide = true
+local losCache = {}
+
+--- Troca (ou solta, se en == nil) o alvo, registrando o instante da troca.
+local function setTarget(en, now)
+	local newModel = en and en.m or nil
+	if newModel ~= target then
+		if target then dropped[target] = now end
+		target = newModel
+		lastSwitch = now
+		outTime, blockTime = 0, 0
+	end
+end
+
+--- Visível = nenhum obstáculo entre a câmera e o alvo. Outros PERSONAGENS não contam
+--- como obstáculo (alguém passando na frente da mira não derruba nem troca a trava).
+local function visible(en)
+	if not S.WallCheck then return true end
+	if en.vis ~= nil then return en.vis end
+	local c = losCache[en.m]
+	if c and ctx.now - c.t < TUNING.LosInterval then
+		en.vis = c.ok
+		return c.ok
+	end
+	local hit = WS:Raycast(ctx.camPos, en.hrp.Position - ctx.camPos, rayParams)
+	local ok = hit == nil
+	losCache[en.m] = { t = ctx.now, ok = ok }
+	en.vis = ok
+	return ok
+end
+
+--- Elegível para SER escolhido: dentro do círculo, no alcance e visível.
+--- (en já passou pelo filtro de validade e de equipe em listTargets, revalidado todo frame.)
+local function eligible(en, r)
+	return en.sd <= r and en.dist <= S.MaxDist and visible(en)
+end
+
+--- Critério 5: menor distância angular ao centro da mira; empate → menor distância física.
+local function better(a, b)
+	if math.abs(a.ang - b.ang) > TUNING.TieDeg then return a.ang < b.ang end
+	return a.dist < b.dist
+end
+
+local function pickBest(list, r, exclude, voluntary, now)
+	local best
+	for _, en in ipairs(list) do
+		if en.m ~= exclude and eligible(en, r) then
+			-- Anti-ping-pong: quem acabou de ser solto não volta numa troca voluntária.
+			local recent = voluntary and dropped[en.m] and (now - dropped[en.m]) < S.MinSwitch
+			if not recent and (not best or better(en, best)) then best = en end
+		end
+	end
+	return best
+end
+
+--- Um passo do sistema de seleção. Retorna a entrada do alvo atual (ou nil).
+local function selectTarget(list, byModel, r, dt, now)
+	local cur = target and byModel[target] or nil
+	local forced = false
+
+	if target then
+		if not cur then
+			-- (2) morreu, saiu do jogo, perdeu o personagem, virou aliado ou ficou inválido
+			forced = true
+		elseif cur.dist > S.MaxDist * TUNING.RangeMargin then
+			-- (3) ultrapassou a distância máxima
+			forced = true
+		else
+			-- (4) e (9): obstrução com tolerância; se voltar a ficar visível, o contador zera
+			cur.blocked = S.WallCheck and not visible(cur)
+			blockTime = cur.blocked and (blockTime + dt) or 0
+			-- saída do círculo (+ tolerância) por tempo persistente
+			outTime = (cur.sd > r + S.Tol) and (outTime + dt) or 0
+			if blockTime > S.ObstructTol or outTime > TUNING.OutGrace then forced = true end
+		end
+	end
+
+	if forced then
+		-- Troca imediata (não depende do intervalo mínimo). (10) sem candidatos → solta com segurança.
+		local best = pickBest(list, r, target, false, now)
+		setTarget(best, now)
+		cur = best
+	elseif target and S.Auto then
+		-- (1) persistência: só considera troca antecipada se o alvo atual ficou pior...
+		if now - lastSwitch >= S.MinSwitch then -- (6) anti-oscilação
+			local penalty = (cur.blocked and TUNING.BlockedPenalty or 0) + (cur.sd > r and TUNING.OutsidePenalty or 0)
+			if penalty > 0 then
+				-- (7) ...e se outro tiver vantagem CLARA (relativa e absoluta)
+				local best = pickBest(list, r, target, true, now)
+				if best then
+					local curEff = cur.ang + penalty
+					if best.ang <= curEff * (1 - S.AdvPct / 100) and (curEff - best.ang) >= TUNING.AbsAdvDeg then
+						setTarget(best, now)
+						cur = best
+					end
+				end
+			end
+		end
+	elseif not target and S.Auto and now >= holdOff then
+		-- Sem alvo: escolhe o melhor elegível (se não houver, continua aguardando)
+		local best = pickBest(list, r, nil, false, now)
+		if best then setTarget(best, now); cur = best end
+	end
+
+	-- Seleção manual (botão): escolhe o melhor elegível pela mesma prioridade
+	if pick then
+		pick = false
+		local best = pickBest(list, r, nil, false, now)
+		if best then
+			setTarget(best, now)
+			cur = best
+			toast("Alvo: " .. (best.player and best.player.DisplayName or best.m.Name))
+		else
+			toast("Nenhum alvo no círculo")
+		end
+	end
+
+	return cur
+end
+
+-- ═══ AÇÕES (janela e botões na tela) ═══
 local actions = {}
 function actions.pick() pick = true end
 function actions.release()
-	target, holdOff = nil, os.clock() + 1 -- no automático, só escolhe outro após 1 s
+	setTarget(nil, os.clock())
+	holdOff = os.clock() + 1 -- no automático, só escolhe outro após 1 s
 	toast("Alvo solto")
 end
 
@@ -365,15 +515,15 @@ toggle(pMira, "Seleção automática", "Auto", "Desligado = manual (botão ALVO)
 toggle(pMira, "Mostrar círculo", "ShowFov")
 section(pMira, "Círculo e câmera")
 slider(pMira, "Tamanho do círculo", "Radius", 8, 48, "%")
-slider(pMira, "Suavidade da câmera", "Smooth", 0, 95, "%")
-slider(pMira, "Tolerância de saída", "Tol", 0, 80, " px")
+slider(pMira, "Suavidade da câmera", "Smooth", 0, 95, "%", 5)
+slider(pMira, "Tolerância de saída", "Tol", 0, 80, " px", 4)
 section(pMira, "Alvo")
 button(pMira, "Selecionar alvo no círculo", true, actions.pick)
 button(pMira, "Limpar alvo", false, actions.release)
 
 section(pEsp, "Geral")
 toggle(pEsp, "ESP ativo", "ESP")
-slider(pEsp, "Alcance do ESP", "EspDist", 50, 1500, " st")
+slider(pEsp, "Alcance do ESP", "EspDist", 50, 1500, " st", 50)
 section(pEsp, "Elementos")
 toggle(pEsp, "Caixas", "Box")
 toggle(pEsp, "Nomes", "Name")
@@ -382,12 +532,17 @@ toggle(pEsp, "Barra de vida", "Health")
 toggle(pEsp, "Linhas (tracers)", "Tracer")
 
 section(pFiltros, "Validade")
-toggle(pFiltros, "Ignorar mesma equipe", "Team")
-slider(pFiltros, "Distância de seleção", "MaxDist", 50, 1000, " st")
+toggle(pFiltros, "Ignorar aliados", "Team", "Revalidado a cada frame")
+slider(pFiltros, "Distância máxima", "MaxDist", 50, 1000, " st", 10)
+section(pFiltros, "Persistência do alvo")
+toggle(pFiltros, "Exigir linha de visão", "WallCheck", "Paredes atrasam a troca")
+slider(pFiltros, "Tolerância de obstrução", "ObstructTol", 0.2, 3, " s", 0.1)
+slider(pFiltros, "Intervalo entre trocas", "MinSwitch", 0.5, 5, " s", 0.1)
+slider(pFiltros, "Vantagem para trocar", "AdvPct", 10, 80, "%", 5)
 
 section(pConfig, "Botões na tela")
 toggle(pConfig, "Mostrar LOCK / ALVO", "Hud", "Arraste para reposicionar")
-slider(pConfig, "Tamanho dos botões", "HudScale", 70, 150, "%")
+slider(pConfig, "Tamanho dos botões", "HudScale", 70, 150, "%", 5)
 section(pConfig, "Geral")
 button(pConfig, "Restaurar padrões", false, function()
 	for k, v in pairs(DEFAULT) do
@@ -479,7 +634,10 @@ conn(gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 	end
 end))
 
--- ═══ ALVOS ═══
+-- ═══ PERSONAGENS VÁLIDOS ═══
+-- Revalidado TODO frame: vivo, tem personagem, não é você e (8) não é aliado.
+-- Como a equipe é conferida a cada frame, qualquer mudança de time (do alvo ou sua)
+-- invalida o alvo atual na hora e impede novas seleções de aliados.
 local function listTargets()
 	local out, seen = {}, {}
 	local function add(m, p)
@@ -610,38 +768,43 @@ local function update(dt)
 	circleStroke.Color = target and C.green or Color3.fromRGB(40, 200, 105)
 	circleStroke.Transparency = target and 0.05 or 0.35
 
-	-- Lista de personagens válidos + distâncias
+	-- Lista de personagens válidos + distância física, ângulo e distância na tela
 	local list = (S.Enabled or S.ESP) and listTargets() or {}
-	local camPos = cam.CFrame.Position
+	local camCF = cam.CFrame
+	local camPos, look = camCF.Position, camCF.LookVector
+	ctx.camPos, ctx.now = camPos, now
+	local byModel = {}
 	for _, en in ipairs(list) do
 		local p = en.hrp.Position
-		en.dist = (p - camPos).Magnitude
+		local off = p - camPos
+		en.dist = off.Magnitude
+		en.ang = en.dist > 0.01 and math.deg(math.acos(math.clamp(look:Dot(off / en.dist), -1, 1))) or 0
 		local v = cam:WorldToViewportPoint(p)
 		en.sd = v.Z > 0 and (Vector2.new(v.X, v.Y) - center).Magnitude or math.huge
+		byModel[en.m] = en
 	end
 
-	-- Seleção: mantém o alvo enquanto válido e dentro do círculo + tolerância
+	-- Raycast de visibilidade ignora TODOS os personagens (só cenário conta como obstáculo)
+	if S.WallCheck and S.Enabled then
+		local filter = {}
+		if lp.Character then filter[1] = lp.Character end
+		for _, en in ipairs(list) do filter[#filter + 1] = en.m end
+		rayParams.FilterDescendantsInstances = filter
+	end
+	-- Limpa caches de quem não está mais na lista
+	for m in pairs(losCache) do if not byModel[m] then losCache[m] = nil end end
+	for m, t in pairs(dropped) do
+		if now - t > 10 or not byModel[m] then dropped[m] = nil end
+	end
+
+	-- Seleção persistente
 	local cur
 	if S.Enabled then
-		if target then
-			for _, en in ipairs(list) do if en.m == target then cur = en break end end
-			if cur and cur.sd <= r + S.Tol and cur.dist <= S.MaxDist * 1.05 then lost = 0 else lost += dt end
-			if not cur or lost > 0.2 then target, cur, lost = nil, nil, 0 end
-		end
-		if not target and ((S.Auto and now >= holdOff) or pick) then
-			local best, bestD = nil, r
-			for _, en in ipairs(list) do
-				if en.sd <= bestD and en.dist <= S.MaxDist then best, bestD = en, en.sd end
-			end
-			if best then target, cur, lost = best.m, best, 0 end
-			if pick then
-				toast(best and ("Alvo: " .. (best.player and best.player.DisplayName or best.m.Name)) or "Nenhum alvo no círculo")
-			end
-		end
+		cur = selectTarget(list, byModel, r, dt, now)
 	else
-		target = nil
+		setTarget(nil, now)
+		pick = false
 	end
-	pick = false
 
 	-- Trava de câmera suave: peso sobe/desce (sem puxão), taxa independente de FPS
 	local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
@@ -652,10 +815,9 @@ local function update(dt)
 		local p = cur.hrp.Position
 		aim = aim and aim:Lerp(p, 1 - math.exp(-28 * dt)) or p
 	end
-	if not can or weight <= 0 then
-		if not can then weight = 0 end
-		if weight <= 0 then aim = nil end
-	elseif aim then
+	if not can then weight = 0 end
+	if weight <= 0 then aim = nil end
+	if can and weight > 0 and aim then
 		local e = weight * weight * (3 - 2 * weight)
 		local cf = cam.CFrame
 		local off = aim - cf.Position
@@ -675,12 +837,18 @@ local function update(dt)
 
 	-- Status no cabeçalho
 	local text, col
-	if not S.Enabled then text, col = "Desligado", C.muted
-	elseif target then
-		local en = cur
-		local nm = en and (en.player and en.player.DisplayName or en.m.Name) or "alvo"
-		text, col = ((weight > 0.5) and "Travado · " or "Alvo · ") .. nm, C.green
-	else text, col = "Pronto · sem alvo", C.muted end
+	if not S.Enabled then
+		text, col = "Desligado", C.muted
+	elseif target and cur then
+		local nm = cur.player and cur.player.DisplayName or cur.m.Name
+		if cur.blocked then
+			text, col = "Obstruído · " .. nm, Color3.fromRGB(255, 200, 80)
+		else
+			text, col = ((weight > 0.5) and "Travado · " or "Alvo · ") .. nm, C.green
+		end
+	else
+		text, col = "Pronto · sem alvo", C.muted
+	end
 	if text ~= cache.sub then cache.sub = text; sub.Text = text; sub.TextColor3 = col end
 
 	-- Botões na tela
