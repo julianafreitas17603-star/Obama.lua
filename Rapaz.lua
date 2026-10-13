@@ -1,14 +1,15 @@
 -- ==========================================================
---  💀 PAINEL PRO — AIM + ESP + PvP + Persistente + Speed + Noclip
+--  💀 PAINEL PRO — AIM + AIM NPC + ESP + PvP + Persist + Speed + Noclip
+--  v2.0 — CORRIGIDO (ordem de declaração NPC_AIM)
 -- ==========================================================
 
 repeat task.wait(0.1) until game:IsLoaded()
 
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService     = game:GetService("TweenService")
-local VirtualUser      = game:GetService("VirtualUser")
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local CollectionService = game:GetService("CollectionService")
 
 local player    = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -103,6 +104,34 @@ local function isMove(i)
 end
 
 -- ═══════════════════════════════════════════════════════════
+--  ⚠️ CONFIG DO AIM (declarado ANTES de qualquer função que use)
+--  Movido para cima para evitar erro "attempt to index nil (upvalue NPC_AIM)"
+-- ═══════════════════════════════════════════════════════════
+
+local ACONFIG = {
+    Enabled = false, MaxDistance = 5000, FOV = 360, TeamCheck = true,
+    Prediction = false, PredictionSpeed = 400, Smoothness = 0,
+    AutoFire = false, AFMinDot = 0.85, WeightDistance = 10.0, WeightAngle = 0.05,
+    SwitchMargin = 0,
+}
+
+local NPC_AIM = {
+    Enabled = false,
+    OnlyKeywords = false,
+    TeamCheck = false,
+    MaxDistance = 5000,
+    FOV = 360,
+    Prediction = false,
+    PredictionSpeed = 400,
+    Smoothness = 0,
+    AutoFire = false,
+    AFMinDot = 0.85,
+    WeightDistance = 10.0,
+    WeightAngle = 0.05,
+    SwitchMargin = 0,
+}
+
+-- ═══════════════════════════════════════════════════════════
 --  GUI RAIZ
 -- ═══════════════════════════════════════════════════════════
 local gui = make("ScreenGui", {
@@ -163,9 +192,7 @@ themed(function()
 end)
 TweenService:Create(borderGrad, TweenInfo.new(6, Enum.EasingStyle.Linear, Enum.EasingDirection.In, -1), { Rotation = 360 }):Play()
 
--- ═══════════════════════════════════════════════════════════
---  HEADER
--- ═══════════════════════════════════════════════════════════
+-- HEADER
 local top = make("Frame", { Size = UDim2.new(1, 0, 0, 64), BackgroundTransparency = 1, ZIndex = 2 }, main)
 
 local logo = make("Frame", {
@@ -191,7 +218,7 @@ make("TextLabel", {
 
 make("TextLabel", {
     BackgroundTransparency = 1, Position = UDim2.fromOffset(68, 36),
-    Size = UDim2.new(1, -140, 0, 14), Text = "AIM · ESP · PvP · Persist · Speed · Noclip",
+    Size = UDim2.new(1, -140, 0, 14), Text = "AIM · NPC · ESP · PvP · Speed · Noclip",
     TextColor3 = THEME.Muted, TextSize = 11, Font = Enum.Font.GothamMedium,
     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3,
 }, top)
@@ -238,9 +265,7 @@ do
     end)
 end
 
--- ═══════════════════════════════════════════════════════════
---  SIDEBAR
--- ═══════════════════════════════════════════════════════════
+-- SIDEBAR
 local sidebar = make("Frame", {
     Position = UDim2.fromOffset(12, 76),
     Size = UDim2.new(0, 146, 1, -88),
@@ -296,9 +321,7 @@ make("TextLabel", {
     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
 }, profile)
 
--- ═══════════════════════════════════════════════════════════
---  ABAS
--- ═══════════════════════════════════════════════════════════
+-- ABAS
 local content = make("Frame", {
     Position = UDim2.fromOffset(170, 76),
     Size = UDim2.new(1, -182, 1, -88),
@@ -378,9 +401,7 @@ local function newTab(name, icon, tabOrder)
     return page
 end
 
--- ═══════════════════════════════════════════════════════════
---  COMPONENTES
--- ═══════════════════════════════════════════════════════════
+-- COMPONENTES
 local function text(parent, str, size, color, font)
     return make("TextLabel", {
         BackgroundTransparency = 1, Text = str, TextSize = size,
@@ -634,16 +655,162 @@ local function AngleBetween(a, b)
 end
 
 -- ═══════════════════════════════════════════════════════════
---  AIM
+--  NPC DETECÇÃO
 -- ═══════════════════════════════════════════════════════════
-local ACONFIG = {
-    Enabled = false, MaxDistance = 5000, FOV = 360, TeamCheck = true,
-    Prediction = false, PredictionSpeed = 400, Smoothness = 0,
-    AutoFire = false, AFMinDot = 0.85, WeightDistance = 10.0, WeightAngle = 0.05,
-    SwitchMargin = 0,
+local NPC_KEYWORDS = {
+    "zombie","zumbi","walker","undead","infected","ghoul","monster","mob","enemy","npc","bot","dummy",
+    "creature","hostile","demon","skeleton","target","training","test",
+    "morto","infectado","monstro","inimigo","criatura","esqueleto","fantasma",
+    "chefe","horda","onda","ataque","carniceiro","mutante","podre",
+    "boneco","puppet","manequim","stand","clone","sombra","guard","soldier","soldado","guarda",
+}
+local NPC_FOLDERS = {
+    "zombie","zumbi","mob","enemy","inimigo","monster","monstro","npc","bots","dummy","dummies",
+    "creature","spawn","hostile","horda","onda","ataque","spawner",
+    "bonecos","boneco","puppets","puppet","stands","stand","clones","clone",
+    "enemies","guards","soldiers","mobs",
+}
+local NPC_TEAM_KEYWORDS = {
+    ["red"]="RED",["blue"]="BLUE",["green"]="GREEN",["yellow"]="YELLOW",
+    ["team1"]="T1",["team2"]="T2",["team3"]="T3",["team4"]="T4",
+    ["ally"]="ALLY",["allied"]="ALLY",["friendly"]="ALLY",
+    ["enemy"]="ENEMY",["enemies"]="ENEMY",["hostile"]="ENEMY",
+    ["neutral"]="NEUTRAL",
+    ["vermelho"]="RED",["azul"]="BLUE",["verde"]="GREEN",["amarelo"]="YELLOW",
+    ["aliado"]="ALLY",["aliados"]="ALLY",["inimigo"]="ENEMY",["inimigos"]="ENEMY",
+    ["neutro"]="NEUTRAL",
 }
 
-local lockTarget, lockPart = nil, nil
+local function NameHasKeyword(name, list)
+    local lower = string.lower(tostring(name))
+    for _, kw in ipairs(list) do
+        if string.find(lower, kw, 1, true) then return true end
+    end
+    return false
+end
+
+local function IsInsideFolder(model, folders, maxDepth)
+    local p, depth = model.Parent, 0
+    while p and p ~= workspace and depth < (maxDepth or 4) do
+        if NameHasKeyword(p.Name, folders) then return true end
+        p = p.Parent
+        depth += 1
+    end
+    return false
+end
+
+local function IsPlayerCharacter(model)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Character == model then return true end
+    end
+    return false
+end
+
+local function IsNPC(model)
+    if not model or not model.Parent then return false end
+    if not model:IsA("Model") then return false end
+    if IsPlayerCharacter(model) then return false end
+    if player.Character == model then return false end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not IsAliveHumanoid(hum) then return false end
+
+    if NPC_AIM.OnlyKeywords then
+        if NameHasKeyword(model.Name, NPC_KEYWORDS) then return true end
+        if IsInsideFolder(model, NPC_FOLDERS, 4) then return true end
+        return false
+    end
+
+    return true
+end
+
+local function NPCGetPart(model)
+    if not IsNPC(model) then return nil end
+    local part = model:FindFirstChild("Head")
+    if part and part:IsA("BasePart") then return part end
+    for _, n in ipairs({"UpperTorso","Torso","HumanoidRootPart","LowerTorso"}) do
+        local p = model:FindFirstChild(n)
+        if p and p:IsA("BasePart") then return p end
+    end
+    if model.PrimaryPart then return model.PrimaryPart end
+    for _, p in ipairs(model:GetDescendants()) do
+        if p:IsA("BasePart") then return p end
+    end
+    return nil
+end
+
+local NPC_CACHE, NPC_CACHE_TIME = {}, 0
+
+local function RefreshNPCCache()
+    local now = tick()
+    if now - NPC_CACHE_TIME < 0.5 then return end
+    NPC_CACHE_TIME = now
+    local list = {}
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if IsNPC(obj) then
+            table.insert(list, obj)
+        end
+    end
+    NPC_CACHE = list
+end
+
+local function GetAllNPCs()
+    RefreshNPCCache()
+    return NPC_CACHE
+end
+
+local function NameToTeamKey(name)
+    local lower = string.lower(tostring(name))
+    for kw, key in pairs(NPC_TEAM_KEYWORDS) do
+        if string.find(lower, kw, 1, true) then return key end
+    end
+    return nil
+end
+
+local function GetNPCTeamKey(npc)
+    if not npc then return nil end
+    for _, a in ipairs(TEAM_ATTR_NAMES) do
+        local v = npc:GetAttribute(a)
+        if v ~= nil then
+            local key = NameToTeamKey(v)
+            return "A:" .. (key or tostring(v))
+        end
+    end
+    for _, n in ipairs(TEAM_CHILD_NAMES) do
+        local v = npc:FindFirstChild(n)
+        if v and (v:IsA("StringValue") or v:IsA("IntValue") or v:IsA("NumberValue")) then
+            return "C:" .. (NameToTeamKey(v.Value) or tostring(v.Value))
+        end
+    end
+    local nameKey = NameToTeamKey(npc.Name)
+    if nameKey then return "N:" .. nameKey end
+    local p, depth = npc.Parent, 0
+    while p and p ~= workspace and depth < 4 do
+        local fk = NameToTeamKey(p.Name)
+        if fk then return "F:" .. fk end
+        p = p.Parent
+        depth += 1
+    end
+    for _, tag in ipairs(CollectionService:GetTags(npc)) do
+        local tk = NameToTeamKey(tag)
+        if tk then return "T:" .. tk end
+    end
+    return nil
+end
+
+local function NPCIsEnemy(npc)
+    if not NPC_AIM.TeamCheck then return true end
+    local npcKey = GetNPCTeamKey(npc)
+    local myKey = GetTeamKey(player)
+    if not npcKey or not myKey then return true end
+    local function strip(s) return s:match("^%a+:(.+)$") or s end
+    return strip(npcKey) ~= strip(myKey)
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  AIM (Players + NPCs unificado)
+-- ═══════════════════════════════════════════════════════════
+local lockTarget, lockPart, lockKind = nil, nil, nil
 local lastFire = 0
 
 local function IsEnemy(plr)
@@ -672,16 +839,27 @@ end
 local function IsLockValid()
     if not lockTarget or not lockPart then return false end
     if not lockPart.Parent then return false end
-    if not IsEnemy(lockTarget) then return false end
-    local char = lockTarget.Character
-    if not char or not char.Parent then return false end
-    if not lockPart:IsDescendantOf(char) then return false end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
+
+    if lockKind == "player" then
+        if not IsEnemy(lockTarget) then return false end
+        local char = lockTarget.Character
+        if not char or not char.Parent then return false end
+        if not lockPart:IsDescendantOf(char) then return false end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return false end
+    elseif lockKind == "npc" then
+        if not lockTarget.Parent then return false end
+        if not NPCIsEnemy(lockTarget) then return false end
+        if not lockPart:IsDescendantOf(lockTarget) then return false end
+        local hum = lockTarget:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return false end
+    else
+        return false
+    end
     return true
 end
 
-local function FindBestTarget()
+local function FindBestPlayerTarget()
     local mp, ml = Camera.CFrame.Position, Camera.CFrame.LookVector
     local best, bestPart, bestScore, bestDist = nil, nil, math.huge, nil
     for _, plr in ipairs(Players:GetPlayers()) do
@@ -703,14 +881,43 @@ local function FindBestTarget()
     return best, bestPart, bestDist
 end
 
+local function FindBestNPCTarget()
+    local mp, ml = Camera.CFrame.Position, Camera.CFrame.LookVector
+    local best, bestPart, bestScore, bestDist = nil, nil, math.huge, nil
+    for _, npc in ipairs(GetAllNPCs()) do
+        if NPCIsEnemy(npc) then
+            local part = NPCGetPart(npc)
+            if part then
+                local to = part.Position - mp
+                local d = to.Magnitude
+                if d <= NPC_AIM.MaxDistance then
+                    local ang = AngleBetween(ml, to)
+                    if ang <= NPC_AIM.FOV then
+                        local score = d * NPC_AIM.WeightDistance + ang * NPC_AIM.WeightAngle
+                        if score < bestScore then
+                            bestScore, best, bestPart, bestDist = score, npc, part, d
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best, bestPart, bestDist
+end
+
 local function TryAutoFire()
-    if not ACONFIG.AutoFire or not lockTarget or not lockPart then return end
+    if not lockTarget or not lockPart then return end
+    local enabled = (lockKind == "player" and ACONFIG.AutoFire)
+        or (lockKind == "npc" and NPC_AIM.AutoFire)
+    if not enabled then return end
+
     local now = tick()
     if now - lastFire < 0.1 then return end
     local cam = Camera.CFrame
     local to = lockPart.Position - cam.Position
     if to.Magnitude < 0.01 then return end
-    if cam.LookVector:Dot(to.Unit) < ACONFIG.AFMinDot then return end
+    local minDot = (lockKind == "player") and ACONFIG.AFMinDot or NPC_AIM.AFMinDot
+    if cam.LookVector:Dot(to.Unit) < minDot then return end
     local ch = player.Character
     local tool = ch and ch:FindFirstChildOfClass("Tool")
     if not tool then return end
@@ -720,46 +927,73 @@ end
 
 local function UpdateAim()
     local myChar = player.Character
-    if not myChar then lockTarget, lockPart = nil, nil; return end
+    if not myChar then lockTarget, lockPart, lockKind = nil, nil, nil; return end
     local myHum = myChar:FindFirstChildOfClass("Humanoid")
-    if not IsAliveHumanoid(myHum) then lockTarget, lockPart = nil, nil; return end
-    if not ACONFIG.Enabled then return end
+    if not IsAliveHumanoid(myHum) then lockTarget, lockPart, lockKind = nil, nil, nil; return end
 
-    if lockTarget and not IsLockValid() then lockTarget, lockPart = nil, nil end
+    if not ACONFIG.Enabled and not NPC_AIM.Enabled then return end
 
-    local best, bestPart, bestDist = FindBestTarget()
+    if lockTarget and not IsLockValid() then
+        lockTarget, lockPart, lockKind = nil, nil, nil
+    end
+
+    local best, bestPart, bestKind, bestDist = nil, nil, nil, math.huge
+
+    if ACONFIG.Enabled then
+        local b, p, d = FindBestPlayerTarget()
+        if b and p and d and d < bestDist then
+            best, bestPart, bestKind, bestDist = b, p, "player", d
+        end
+    end
+
+    if NPC_AIM.Enabled then
+        local b, p, d = FindBestNPCTarget()
+        if b and p and d and d < bestDist then
+            best, bestPart, bestKind, bestDist = b, p, "npc", d
+        end
+    end
+
     if best and bestPart then
         local shouldSwitch = false
         if not lockTarget then
             shouldSwitch = true
         elseif best ~= lockTarget then
             local curDist = lockPart and (lockPart.Position - Camera.CFrame.Position).Magnitude
+            local margin = (bestKind == "player") and ACONFIG.SwitchMargin or NPC_AIM.SwitchMargin
             if not curDist then
                 shouldSwitch = true
-            elseif bestDist and (curDist - bestDist) >= (ACONFIG.SwitchMargin or 0) then
+            elseif bestDist and (curDist - bestDist) >= (margin or 0) then
                 shouldSwitch = true
             end
         else
             lockPart = bestPart
         end
-        if shouldSwitch then lockTarget, lockPart = best, bestPart end
+        if shouldSwitch then
+            lockTarget, lockPart, lockKind = best, bestPart, bestKind
+        end
     else
-        lockTarget, lockPart = nil, nil
+        lockTarget, lockPart, lockKind = nil, nil, nil
     end
 
     if lockTarget and lockPart then
         local mp = Camera.CFrame.Position
         local aimPos = lockPart.Position
-        if ACONFIG.Prediction then
+
+        local predictEnabled = (lockKind == "player" and ACONFIG.Prediction)
+            or (lockKind == "npc" and NPC_AIM.Prediction)
+        if predictEnabled then
+            local speed = (lockKind == "player") and ACONFIG.PredictionSpeed or NPC_AIM.PredictionSpeed
             local vel = lockPart.AssemblyLinearVelocity
             local dist = (aimPos - mp).Magnitude
-            aimPos = aimPos + vel * (dist / math.max(ACONFIG.PredictionSpeed, 1))
+            aimPos = aimPos + vel * (dist / math.max(speed, 1))
         end
+
         local des = CFrame.lookAt(mp, aimPos)
-        if ACONFIG.Smoothness <= 0 then
+        local smooth = (lockKind == "player") and ACONFIG.Smoothness or NPC_AIM.Smoothness
+        if smooth <= 0 then
             Camera.CFrame = des
         else
-            Camera.CFrame = Camera.CFrame:Lerp(des, 1 - ACONFIG.Smoothness)
+            Camera.CFrame = Camera.CFrame:Lerp(des, 1 - smooth)
         end
         TryAutoFire()
     end
@@ -875,7 +1109,7 @@ local function ESPUpdateDraw(draw)
 
     draw.holder.Visible = true
 
-    local isTarget = (lockTarget == plr)
+    local isTarget = (lockTarget == plr and lockKind == "player")
     local col = isTarget and THEME.Target or ESP_CONFIG.Color
     local h = math.abs(bot.Y - top.Y)
     local w = h * 0.55
@@ -1023,7 +1257,11 @@ local function UpdatePVP()
     local myHum = myChar:FindFirstChildOfClass("Humanoid")
     if not myHRP or not IsAliveHumanoid(myHum) then return end
     if not lockTarget or not lockPart or not IsLockValid() then return end
-    local targetChar = lockTarget.Character
+
+    local targetChar = lockTarget
+    if lockKind == "player" then
+        targetChar = lockTarget.Character
+    end
     if not targetChar then return end
     local targetHRP = targetChar:FindFirstChild("HumanoidRootPart") or lockPart
     if not targetHRP then return end
@@ -1065,12 +1303,9 @@ end
 RunService.RenderStepped:Connect(UpdatePVP)
 
 -- ═══════════════════════════════════════════════════════════
---  PERSISTENTE
+--  PERSISTENTE / SPEED / NOCLIP
 -- ═══════════════════════════════════════════════════════════
-local Persist = {
-    EspPersist = false,
-    PuloInfinito = false,
-}
+local Persist = { EspPersist = false, PuloInfinito = false }
 local lastPulo = 0
 
 connect(UserInputService.JumpRequest, function()
@@ -1081,19 +1316,12 @@ connect(UserInputService.JumpRequest, function()
     local now = tick()
     if now - lastPulo < 0.08 then return end
     lastPulo = now
-    pcall(function()
-        hum:ChangeState(Enum.HumanoidStateType.Jumping)
-    end)
+    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
 end)
 
--- ═══════════════════════════════════════════════════════════
---  SPEED
--- ═══════════════════════════════════════════════════════════
 local SpeedState = {
-    WalkEnabled = false,
-    WalkSpeed = 16,
-    JumpEnabled = false,
-    JumpPower = 50,
+    WalkEnabled = false, WalkSpeed = 16,
+    JumpEnabled = false, JumpPower = 50,
 }
 
 RunService.RenderStepped:Connect(function()
@@ -1122,18 +1350,13 @@ connect(player.CharacterAdded, function(char)
     task.wait(0.5)
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then return end
-    if SpeedState.WalkEnabled then
-        hum.WalkSpeed = SpeedState.WalkSpeed
-    end
+    if SpeedState.WalkEnabled then hum.WalkSpeed = SpeedState.WalkSpeed end
     if SpeedState.JumpEnabled then
         hum.UseJumpPower = true
         hum.JumpPower = SpeedState.JumpPower
     end
 end)
 
--- ═══════════════════════════════════════════════════════════
---  NOCLIP
--- ═══════════════════════════════════════════════════════════
 local Noclip = { Enabled = false }
 
 local function NoclipApplyToChar(char)
@@ -1170,15 +1393,15 @@ local aimTab = newTab("Aim", "🎯", 1)
 text(aimTab, "Aimbot Players", 20, THEME.Text, Enum.Font.GothamBold)
 text(aimTab, "Trava no inimigo mais próximo. Solta na hora se o alvo morrer.", 12, THEME.SubText)
 
-addToggle(aimTab, "🎯 Ativar AIM", false, function(v)
+addToggle(aimTab, "🎯 Ativar AIM Players", false, function(v)
     ACONFIG.Enabled = v
-    if not v then lockTarget, lockPart = nil, nil end
-    notify(v and "🎯 AIM ON" or "AIM OFF")
+    if not v and lockKind == "player" then lockTarget, lockPart, lockKind = nil, nil, nil end
+    notify(v and "🎯 AIM Players ON" or "AIM Players OFF")
 end)
 addToggle(aimTab, "🛡️ Team Check (ignora aliados)", true, function(v)
     ACONFIG.TeamCheck = v
-    if v and lockTarget and not IsLockValid() then
-        lockTarget, lockPart = nil, nil
+    if v and lockTarget and lockKind == "player" and not IsLockValid() then
+        lockTarget, lockPart, lockKind = nil, nil, nil
     end
     notify(v and "🛡️ Team Check ON" or "Team Check OFF")
 end)
@@ -1200,14 +1423,89 @@ addSlider(aimTab, "Prioridade por distância", 1, 20, 10, function(v) ACONFIG.We
 addSlider(aimTab, "Tolerância de troca (studs)", 0, 100, 0, function(v) ACONFIG.SwitchMargin = v end)
 
 addButton(aimTab, "🔄 Soltar alvo agora", true, function()
-    lockTarget, lockPart = nil, nil
+    lockTarget, lockPart, lockKind = nil, nil, nil
     notify("🔄 Alvo solto")
 end)
 
 -- ═══════════════════════════════════════════════════════════
+--  ABA AIM NPC
+-- ═══════════════════════════════════════════════════════════
+local npcTab = newTab("AIM NPC", "👹", 2)
+text(npcTab, "Aimbot NPCs / Zumbis", 20, THEME.Text, Enum.Font.GothamBold)
+text(npcTab, "Trava em qualquer NPC com Humanoid vivo. Não pega players.", 12, THEME.SubText)
+
+text(npcTab, "🎯 SISTEMA", 12, THEME.SubText, Enum.Font.GothamBold)
+
+addToggle(npcTab, "👹 Ativar AIM NPCs", false, function(v)
+    NPC_AIM.Enabled = v
+    if not v and lockKind == "npc" then lockTarget, lockPart, lockKind = nil, nil, nil end
+    notify(v and "👹 AIM NPCs ON" or "AIM NPCs OFF")
+end)
+
+addToggle(npcTab, "🎯 Só keywords (zumbi/mob/npc)", false, function(v)
+    NPC_AIM.OnlyKeywords = v
+    NPC_CACHE_TIME = 0
+    notify(v and "🎯 Só keywords ON" or "Todos os NPCs")
+end)
+
+addToggle(npcTab, "🛡️ Team Check NPC (ignora aliados)", false, function(v)
+    NPC_AIM.TeamCheck = v
+    if v and lockTarget and lockKind == "npc" and not IsLockValid() then
+        lockTarget, lockPart, lockKind = nil, nil, nil
+    end
+    notify(v and "🛡️ Team Check NPC ON" or "Team Check NPC OFF")
+end)
+
+addToggle(npcTab, "🎯 Predição", false, function(v)
+    NPC_AIM.Prediction = v
+    notify(v and "🎯 Predição ON" or "OFF")
+end)
+
+addToggle(npcTab, "🔥 Auto Fire", false, function(v)
+    NPC_AIM.AutoFire = v
+    notify(v and "🔥 Auto Fire ON" or "OFF")
+end)
+
+text(npcTab, "⚙️ AJUSTES", 12, THEME.SubText, Enum.Font.GothamBold)
+
+addSlider(npcTab, "FOV (graus)", 5, 360, 360, function(v) NPC_AIM.FOV = v end)
+addSlider(npcTab, "Distância máx", 20, 8000, 5000, function(v) NPC_AIM.MaxDistance = v end)
+addSlider(npcTab, "Velocidade da bala", 50, 3000, 400, function(v) NPC_AIM.PredictionSpeed = v end)
+addSlider(npcTab, "Suavidade (0 = colado)", 0, 1, 0, function(v) NPC_AIM.Smoothness = v end, 2)
+addSlider(npcTab, "Prioridade por distância", 1, 20, 10, function(v) NPC_AIM.WeightDistance = v end)
+addSlider(npcTab, "Tolerância de troca (studs)", 0, 100, 0, function(v) NPC_AIM.SwitchMargin = v end)
+
+text(npcTab, "🔍 DIAGNÓSTICO", 12, THEME.SubText, Enum.Font.GothamBold)
+
+addButton(npcTab, "🔍 Contar NPCs no mapa", true, function()
+    NPC_CACHE_TIME = 0
+    local npcs = GetAllNPCs()
+    local inimigos = 0
+    for _, npc in ipairs(npcs) do
+        if NPCIsEnemy(npc) then inimigos = inimigos + 1 end
+    end
+    if NPC_AIM.TeamCheck then
+        notify("👹 " .. #npcs .. " NPCs | " .. inimigos .. " inimigos")
+    else
+        notify("👹 " .. #npcs .. " NPCs vivos no mapa")
+    end
+end)
+
+addButton(npcTab, "🔄 Soltar alvo NPC agora", false, function()
+    if lockKind == "npc" then
+        lockTarget, lockPart, lockKind = nil, nil, nil
+        notify("🔄 Alvo NPC solto")
+    else
+        notify("Nenhum NPC travado")
+    end
+end)
+
+text(npcTab, "ℹ️ Modo padrão pega QUALQUER Model com Humanoid vivo que não seja player. Ative 'Só keywords' pra restringir.", 11, THEME.Muted)
+
+-- ═══════════════════════════════════════════════════════════
 --  ABA ESP
 -- ═══════════════════════════════════════════════════════════
-local espTab = newTab("ESP", "👁️", 2)
+local espTab = newTab("ESP", "👁️", 3)
 text(espTab, "ESP", 20, THEME.Text, Enum.Font.GothamBold)
 text(espTab, "Mostra caixas, nomes, distância e vida dos inimigos.", 12, THEME.SubText)
 
@@ -1278,7 +1576,7 @@ colorStrokes[1].Transparency = 0
 -- ═══════════════════════════════════════════════════════════
 --  ABA PVP
 -- ═══════════════════════════════════════════════════════════
-local pvpTab = newTab("PvP", "⚔️", 3)
+local pvpTab = newTab("PvP", "⚔️", 4)
 text(pvpTab, "PvP Rush", 20, THEME.Text, Enum.Font.GothamBold)
 text(pvpTab, "Cola no inimigo e ataca. Só funciona em partida.", 12, THEME.SubText)
 
@@ -1322,11 +1620,9 @@ end)
 -- ═══════════════════════════════════════════════════════════
 --  ABA PERSISTENTE
 -- ═══════════════════════════════════════════════════════════
-local persistTab = newTab("Persistente", "♻️", 4)
+local persistTab = newTab("Persistente", "♻️", 5)
 text(persistTab, "Persistente", 20, THEME.Text, Enum.Font.GothamBold)
 text(persistTab, "ESP que continua mesmo atrás de parede.", 12, THEME.SubText)
-
-text(persistTab, "👁️ ESP PERSISTENTE", 12, THEME.SubText, Enum.Font.GothamBold)
 
 addToggle(persistTab, "♻️ ESP Persistente", false, function(v)
     ESP_CONFIG.Persist = v
@@ -1340,12 +1636,11 @@ text(persistTab, "ℹ️ ESP Persistente: continua mostrando mesmo quando o alvo
 -- ═══════════════════════════════════════════════════════════
 --  ABA SPEED
 -- ═══════════════════════════════════════════════════════════
-local speedTab = newTab("Speed", "⚡", 5)
+local speedTab = newTab("Speed", "⚡", 6)
 text(speedTab, "Speed & Pulo", 20, THEME.Text, Enum.Font.GothamBold)
-text(speedTab, "WalkSpeed e JumpPower persistentes — o jogo NÃO consegue resetar.", 12, THEME.SubText)
+text(speedTab, "WalkSpeed e JumpPower persistentes.", 12, THEME.SubText)
 
 text(speedTab, "🏃 VELOCIDADE", 12, THEME.SubText, Enum.Font.GothamBold)
-
 addToggle(speedTab, "⚡ WalkSpeed Persistente", false, function(v)
     SpeedState.WalkEnabled = v
     if not v then
@@ -1355,13 +1650,9 @@ addToggle(speedTab, "⚡ WalkSpeed Persistente", false, function(v)
     end
     notify(v and "⚡ WalkSpeed ON" or "WalkSpeed OFF")
 end)
-
-addSlider(speedTab, "Velocidade (WalkSpeed)", 16, 500, 16, function(v)
-    SpeedState.WalkSpeed = v
-end)
+addSlider(speedTab, "Velocidade (WalkSpeed)", 16, 500, 16, function(v) SpeedState.WalkSpeed = v end)
 
 text(speedTab, "🦘 PULO", 12, THEME.SubText, Enum.Font.GothamBold)
-
 addToggle(speedTab, "🚀 JumpPower Persistente", false, function(v)
     SpeedState.JumpEnabled = v
     if not v then
@@ -1374,25 +1665,18 @@ addToggle(speedTab, "🚀 JumpPower Persistente", false, function(v)
     end
     notify(v and "🚀 JumpPower ON" or "JumpPower OFF")
 end)
-
-addSlider(speedTab, "Força do Pulo (JumpPower)", 50, 500, 50, function(v)
-    SpeedState.JumpPower = v
-end)
+addSlider(speedTab, "Força do Pulo (JumpPower)", 50, 500, 50, function(v) SpeedState.JumpPower = v end)
 
 text(speedTab, "🦘 PULO INFINITO", 12, THEME.SubText, Enum.Font.GothamBold)
-
 addToggle(speedTab, "🦘 Pulo Infinito", false, function(v)
     Persist.PuloInfinito = v
     notify(v and "🦘 Pulo Infinito ON" or "Pulo Infinito OFF")
 end)
 
 text(speedTab, "⚡ PRESETS", 12, THEME.SubText, Enum.Font.GothamBold)
-
 addButton(speedTab, "🔥 Speed 100 + Pulo 150", true, function()
-    SpeedState.WalkSpeed = 100
-    SpeedState.JumpPower = 150
-    SpeedState.WalkEnabled = true
-    SpeedState.JumpEnabled = true
+    SpeedState.WalkSpeed = 100; SpeedState.JumpPower = 150
+    SpeedState.WalkEnabled = true; SpeedState.JumpEnabled = true
     local ch = player.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     if hum then
@@ -1402,12 +1686,9 @@ addButton(speedTab, "🔥 Speed 100 + Pulo 150", true, function()
     end
     notify("🔥 Speed 100 · Pulo 150")
 end)
-
 addButton(speedTab, "⚡ Speed 200 + Pulo 250", false, function()
-    SpeedState.WalkSpeed = 200
-    SpeedState.JumpPower = 250
-    SpeedState.WalkEnabled = true
-    SpeedState.JumpEnabled = true
+    SpeedState.WalkSpeed = 200; SpeedState.JumpPower = 250
+    SpeedState.WalkEnabled = true; SpeedState.JumpEnabled = true
     local ch = player.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     if hum then
@@ -1417,12 +1698,9 @@ addButton(speedTab, "⚡ Speed 200 + Pulo 250", false, function()
     end
     notify("⚡ Speed 200 · Pulo 250")
 end)
-
 addButton(speedTab, "💥 Reset (Speed 16 · Pulo 50)", false, function()
-    SpeedState.WalkEnabled = false
-    SpeedState.JumpEnabled = false
-    SpeedState.WalkSpeed = 16
-    SpeedState.JumpPower = 50
+    SpeedState.WalkEnabled = false; SpeedState.JumpEnabled = false
+    SpeedState.WalkSpeed = 16; SpeedState.JumpPower = 50
     local ch = player.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     if hum then
@@ -1436,7 +1714,7 @@ end)
 -- ═══════════════════════════════════════════════════════════
 --  ABA NOCLIP
 -- ═══════════════════════════════════════════════════════════
-local noclipTab = newTab("Noclip", "🧱", 6)
+local noclipTab = newTab("Noclip", "🧱", 7)
 text(noclipTab, "Noclip", 20, THEME.Text, Enum.Font.GothamBold)
 text(noclipTab, "Atravessa paredes, portas e qualquer objeto sólido.", 12, THEME.SubText)
 
@@ -1600,7 +1878,7 @@ end)
 
 player.CharacterAdded:Connect(function(char)
     task.wait(0.5)
-    lockTarget, lockPart = nil, nil
+    lockTarget, lockPart, lockKind = nil, nil, nil
     ESPClearAll()
     task.wait(1)
     ESPRefresh()
@@ -1613,5 +1891,5 @@ end)
 ESPRefresh()
 showBubble(true)
 
-print("✅ Painel Pro — AIM + ESP + PvP + Persistente + Speed + Noclip")
+print("✅ Painel Pro v2.0 — AIM + AIM NPC + ESP + PvP + Speed + Noclip")
 print("👉 Clique na bolinha 💀 pra abrir (ou tecla J)")
