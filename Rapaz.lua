@@ -774,7 +774,7 @@ local ESP_CONFIG = {
     Enabled = true, Box = true, Name = true, Distance = true, Health = true,
     Tracer = false, TeamCheck = true,
     Color = Color3.fromRGB(255, 30, 30),
-    MaxDistance = 1500, TextSize = 13, Thickness = 1.5, MaxOnScreen = 12,
+    MaxDistance = 1500, TextSize = 13, Thickness = 1.5,
     Persist = false,
 }
 
@@ -1065,7 +1065,7 @@ end
 RunService.RenderStepped:Connect(UpdatePVP)
 
 -- ═══════════════════════════════════════════════════════════
---  PERSISTENTE — Pulo infinito + ESP persistente
+--  PERSISTENTE
 -- ═══════════════════════════════════════════════════════════
 local Persist = {
     EspPersist = false,
@@ -1073,7 +1073,7 @@ local Persist = {
 }
 local lastPulo = 0
 
-connect(UserInputService.JumpRequest:Connect(function()
+connect(UserInputService.JumpRequest, function()
     if not Persist.PuloInfinito then return end
     local ch = player.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -1084,10 +1084,10 @@ connect(UserInputService.JumpRequest:Connect(function()
     pcall(function()
         hum:ChangeState(Enum.HumanoidStateType.Jumping)
     end)
-end))
+end)
 
 -- ═══════════════════════════════════════════════════════════
---  SPEED — WalkSpeed + JumpPower persistentes (ROBUSTO)
+--  SPEED
 -- ═══════════════════════════════════════════════════════════
 local SpeedState = {
     WalkEnabled = false,
@@ -1096,7 +1096,6 @@ local SpeedState = {
     JumpPower = 50,
 }
 
--- Reaplica TODO FRAME: impede o jogo de resetar
 RunService.RenderStepped:Connect(function()
     local ch = player.Character
     if not ch then return end
@@ -1119,8 +1118,7 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- Reaplica após respawn
-connect(player.CharacterAdded:Connect(function(char)
+connect(player.CharacterAdded, function(char)
     task.wait(0.5)
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then return end
@@ -1131,7 +1129,7 @@ connect(player.CharacterAdded:Connect(function(char)
         hum.UseJumpPower = true
         hum.JumpPower = SpeedState.JumpPower
     end
-end))
+end)
 
 -- ═══════════════════════════════════════════════════════════
 --  NOCLIP
@@ -1158,12 +1156,12 @@ RunService.Stepped:Connect(function()
     end
 end)
 
-connect(player.CharacterAdded:Connect(function(char)
+connect(player.CharacterAdded, function(char)
     if Noclip.Enabled then
         task.wait(0.3)
         NoclipApplyToChar(char)
     end
-end))
+end)
 
 -- ═══════════════════════════════════════════════════════════
 --  ABA AIM
@@ -1322,7 +1320,7 @@ addButton(pvpTab, "🔍 Checar se estou em partida", true, function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
---  ABA PERSISTENTE (só ESP)
+--  ABA PERSISTENTE
 -- ═══════════════════════════════════════════════════════════
 local persistTab = newTab("Persistente", "♻️", 4)
 text(persistTab, "Persistente", 20, THEME.Text, Enum.Font.GothamBold)
@@ -1340,7 +1338,7 @@ end)
 text(persistTab, "ℹ️ ESP Persistente: continua mostrando mesmo quando o alvo está atrás de parede ou fora do campo de visão.", 11, THEME.Muted)
 
 -- ═══════════════════════════════════════════════════════════
---  ABA SPEED (WalkSpeed + JumpPower persistentes)
+--  ABA SPEED
 -- ═══════════════════════════════════════════════════════════
 local speedTab = newTab("Speed", "⚡", 5)
 text(speedTab, "Speed & Pulo", 20, THEME.Text, Enum.Font.GothamBold)
