@@ -1,4 +1,4 @@
--- OBSIDIAN Pro v2.5 — trava por esqueleto + precisão máxima + zero bugs
+-- OBSIDIAN Pro v2.6 — rastreamento total (corre, pula, não solta)
 -- Alvos: jogadores (respeita equipe) e NPCs com a tag "AuthorizedTarget".
 -- Local: StarterPlayer > StarterPlayerScripts (LocalScript).
 
@@ -40,8 +40,8 @@ local ROW = IS_TOUCH and 54 or 50
 local S = {
 	Enabled = true, Lock = true, Auto = true, ShowFov = true,
 	Radius = 25,
-	Smooth = 60,
-	Tol = 24,
+	Smooth = 55,
+	Tol = 40,                 -- v2.6: +40px de tolerância
 	MaxDist = 700,
 	Team = true,
 	WallCheck = false,
@@ -53,31 +53,37 @@ local S = {
 	ESP = true, Box = true, Name = true, Dist = true, Health = true, Tracer = false, AimDot = true,
 	EspDist = 500,
 	Hud = IS_TOUCH, HudScale = 100,
-	-- NOVOS (v2.5)
-	Predict = false,          -- predição de movimento
-	PredictSpeed = 400,       -- velocidade da bala (studs/s) usada na predição
-	PredictMaxLead = 0.4,     -- tempo máximo de lead (s)
-	SnapRange = 8,            -- distância em studs que ativa snap na cabeça
-	AutoSnap = true,          -- ativa snap automaticamente em curta distância
+	Predict = true,           -- v2.6: ligado por padrão
+	PredictSpeed = 400,
+	PredictMaxLead = 0.5,     -- v2.6: +lead
+	SnapRange = 8,
+	AutoSnap = true,
+	StickyLock = true,        -- v2.6: NÃO solta fácil
+	VerticalTrack = true,     -- v2.6: acompanha pulo
+	AdaptiveRate = true,      -- v2.6: rastreamento acelerado com velocidade do alvo
+	ReleaseDelay = 0.45,      -- v2.6: paciência antes de soltar
 }
 local DEFAULT = table.clone(S)
 local refresh = {}
 
 local TUNING = {
-	OutGrace = 0.2,
-	RangeMargin = 1.05,
+	OutGrace = 0.45,          -- v2.6: era 0.2 → não solta em strafe
+	RangeMargin = 1.20,       -- v2.6: era 1.05 → +20% de alcance fantasma
 	TieDeg = 0.25,
 	AbsAdvDeg = 2.5,
 	BlockedPenalty = 10,
 	OutsidePenalty = 5,
 	LosInterval = 0.1,
-	AimFilter = 26,           -- 1/s: 1º filtro (tremor)
-	AimFilterSlow = 12,       -- 1/s: 2º filtro (lag)
-	WeightRate = 14,          -- 1/s: mistura tronco/cabeça
-	SnapRate = 40,            -- 1/s: taxa de snap quando muito perto
-	VisCacheCore = 0.06,      -- s: cache de visibilidade do core
-	VisCacheAny = 0.14,       -- s: cache de visibilidade de qualquer parte
-	SkelCacheTime = 0.5,      -- s: cache do esqueleto
+	AimFilter = 45,           -- v2.6: 26 → 45 (mais ágil)
+	AimFilterSlow = 18,       -- v2.6: 12 → 18
+	AimFilterTurbo = 60,      -- v2.6: para alvo muito rápido
+	WeightRate = 14,
+	SnapRate = 40,
+	VisCacheCore = 0.06,
+	VisCacheAny = 0.14,
+	SkelCacheTime = 0.5,
+	SpeedFast = 25,           -- studs/s: alvo é considerado "rápido"
+	SpeedTurbo = 60,          -- studs/s: alvo é "muito rápido"
 }
 
 -- ═════════════════════════════════════════════════════════════════════════════
@@ -241,11 +247,6 @@ local function makeIcon(kind, parent, size, color)
 		outline(12, 8.5, 9, 11, 2, 0.5); solid(12, 15.5, 15, 11, nil, 0.18)
 	elseif kind == "reset" then
 		outline(12, 12, 15, 15, 1.8, 0.5); solid(19, 6, 5, 5, 45)
-	elseif kind == "predict" then
-		outline(12, 12, 16, 16, 1.6, 0.5)
-		solid(12, 12, 2.4, 8, nil, 0.5)
-		solid(6, 6, 2, 2, nil, 0.5); solid(18, 6, 2, 2, nil, 0.5)
-		solid(6, 18, 2, 2, nil, 0.5); solid(18, 18, 2, 2, nil, 0.5)
 	end
 
 	return {
@@ -660,10 +661,15 @@ local stats = {
 	inRange = 0, inCircle = 0, blocked = 0,
 }
 
+-- v2.6: rastreio de velocidade do alvo para rastreamento adaptativo
+local targetSpeed = 0
+local targetSpeedSmooth = 0
+
 local Lock = { weight = 0, aim = nil, aimSlow = nil, rot = nil, final = nil, active = false }
 
 local function resetLock()
 	Lock.weight, Lock.aim, Lock.aimSlow, Lock.rot, Lock.final, Lock.active = 0, nil, nil, nil, nil, false
+	targetSpeed, targetSpeedSmooth = 0, 0
 end
 
 local rayParams = RaycastParams.new()
@@ -719,6 +725,7 @@ local function setTarget(en, now)
 		target = newModel
 		lastSwitch = now
 		outTime, blockTime = 0, 0
+		targetSpeed, targetSpeedSmooth = 0, 0
 	end
 end
 
@@ -788,12 +795,9 @@ local function eligible(en, r)
 	return en.sd <= r and en.dist <= S.MaxDist and visibleCore(en)
 end
 
--- ═══ Score de seleção (v2.5: balanceado) ═════════════════════════════════════
---  Menor score vence. Combina ângulo, distância e visibilidade.
---  Enquanto o alvo atual estiver vivo e dentro do círculo, mantém.
 local function scoreOf(en)
 	local angTerm = en.ang * 1.0
-	local distTerm = en.dist * 0.03  -- cada 100 studs = 3 graus equivalentes
+	local distTerm = en.dist * 0.03
 	local visTerm = (S.WallCheck and not visibleCore(en)) and 30 or 0
 	return angTerm + distTerm + visTerm
 end
@@ -824,15 +828,38 @@ local function selectTarget(list, byModel, r, dt, now)
 
 	if target then
 		if not cur then
-			forced = true
-		elseif cur.dist > S.MaxDist * TUNING.RangeMargin then
-			forced = true
-		else
-			cur.sdKeep = keepDistance(cur)
-			cur.blocked = S.WallCheck and not visibleAny(cur)
-			blockTime = cur.blocked and (blockTime + dt) or 0
-			outTime = (cur.sdKeep > r + S.Tol) and (outTime + dt) or 0
-			if blockTime > S.ObstructTol or outTime > TUNING.OutGrace then forced = true end
+			-- v2.6: em vez de soltar direto, dá um mini-grace se o personagem ainda existe
+			local ch = target.Parent
+			if ch and ch.Parent and ch:FindFirstChildOfClass("Humanoid") then
+				local sk = getSkeleton(ch)
+				local anchor = sk.parts.root or sk.parts.torso or sk.parts.head
+				if anchor then
+					-- Reconstitui entry
+					local en = { m = ch, hum = ch:FindFirstChildOfClass("Humanoid"), hrp = anchor, sk = sk, player = Players:GetPlayerFromCharacter(ch) }
+					local off = anchor.Position - ctx.camPos
+					en.dist = off.Magnitude
+					en.ang = math.deg(math.acos(math.clamp(ctx.cam.CFrame.LookVector:Dot(off.Unit), -1, 1)))
+					local v = ctx.cam:WorldToViewportPoint(anchor.Position)
+					en.sd = v.Z > 0 and (Vector2.new(v.X, v.Y) - ctx.center).Magnitude or math.huge
+					if S.StickyLock then
+						en.blocked = false
+						cur = en
+					end
+				end
+			end
+			if not cur then forced = true end
+		end
+		if cur and not forced then
+			if cur.dist > S.MaxDist * TUNING.RangeMargin then
+				forced = true
+			else
+				cur.sdKeep = keepDistance(cur)
+				cur.blocked = S.WallCheck and not visibleAny(cur)
+				blockTime = cur.blocked and (blockTime + dt) or 0
+				outTime = (cur.sdKeep > r + S.Tol) and (outTime + dt) or 0
+				-- v2.6: só força saída se ultrapassar as tolerâncias generosas
+				if blockTime > S.ObstructTol or outTime > TUNING.OutGrace then forced = true end
+			end
 		end
 	end
 
@@ -874,7 +901,7 @@ local function selectTarget(list, byModel, r, dt, now)
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
---  PONTO DE MIRA (v2.5: filtro duplo + predição + snap)
+--  PONTO DE MIRA
 -- ═════════════════════════════════════════════════════════════════════════════
 local Aim = { model = nil, wH = 0, wT = 1, wO = 0, key = nil }
 
@@ -884,9 +911,8 @@ local function aimWeights(en)
 	local tKey = parts.torso and "torso" or (parts.root and "root" or nil)
 	local bias = S.AimBias / 100
 
-	-- Auto-bias por distância (v2.5): longe prioriza tronco, perto prioriza cabeça
 	if S.AutoSnap then
-		local distBias = math.clamp(1 - (en.dist - 20) / 60, 0, 1) -- 20 studs=1, 80 studs=0
+		local distBias = math.clamp(1 - (en.dist - 20) / 60, 0, 1)
 		bias = math.max(bias, distBias * 0.95)
 	end
 
@@ -922,21 +948,22 @@ local function updateAimPoint(en, dt)
 	local pH = parts.head and parts.head.Position or pT
 	local pO = (Aim.key and parts[Aim.key]) and parts[Aim.key].Position or pT
 
-	-- Predição (v2.5): usar velocity do HRP para anticipar movimento
-	if S.Predict then
-		local hrp = parts.root or parts.torso or parts.head
-		if hrp then
-			local vel = hrp.AssemblyLinearVelocity
-			if vel.Magnitude > 1 then
-				local camPos = ctx.camPos
-				local basePos = (pH * Aim.wH + pT * Aim.wT + pO * Aim.wO) / math.max(Aim.wH + Aim.wT + Aim.wO, 1e-3)
-				local dist = (basePos - camPos).Magnitude
-				local travelTime = math.min(dist / math.max(S.PredictSpeed, 1), S.PredictMaxLead)
-				local lead = vel * travelTime
-				pH = pH + lead
-				pT = pT + lead
-				pO = pO + lead
-			end
+	-- v2.6: predição + velocidade rastreada
+	local hrp = parts.root or parts.torso or parts.head
+	if hrp then
+		local vel = hrp.AssemblyLinearVelocity
+		targetSpeed = vel.Magnitude
+		targetSpeedSmooth = targetSpeedSmooth + (targetSpeed - targetSpeedSmooth) * math.min(1, dt * 8)
+
+		if S.Predict and vel.Magnitude > 1 then
+			local camPos = ctx.camPos
+			local basePos = (pH * Aim.wH + pT * Aim.wT + pO * Aim.wO) / math.max(Aim.wH + Aim.wT + Aim.wO, 1e-3)
+			local dist = (basePos - camPos).Magnitude
+			local travelTime = math.min(dist / math.max(S.PredictSpeed, 1), S.PredictMaxLead)
+			local lead = vel * travelTime
+			pH = pH + lead
+			pT = pT + lead
+			pO = pO + lead
 		end
 	end
 
@@ -974,7 +1001,12 @@ toggle(pMira, "Mostrar círculo", "ShowFov")
 section(pMira, "Círculo e câmera")
 slider(pMira, "Tamanho do círculo", "Radius", 8, 48, "%")
 slider(pMira, "Suavidade da câmera", "Smooth", 0, 95, "%", 5)
-slider(pMira, "Tolerância de saída", "Tol", 0, 80, " px", 4)
+slider(pMira, "Tolerância de saída", "Tol", 0, 120, " px", 4)
+section(pMira, "Rastreamento rápido")
+toggle(pMira, "Trava persistente (não solta correndo)", "StickyLock", "Mantém o alvo mesmo em movimento rápido")
+toggle(pMira, "Rastreamento adaptativo", "AdaptiveRate", "Acelera a câmera com a velocidade do alvo")
+toggle(pMira, "Acompanhar pulo/queda", "VerticalTrack", "Segue o alvo no ar")
+slider(pMira, "Delay p/ soltar", "ReleaseDelay", 0.1, 1.5, " s", 0.05)
 section(pMira, "Mira precisa")
 slider(pMira, "Ponto de mira (tronco ↔ cabeça)", "AimBias", 0, 100, "%", 5)
 toggle(pMira, "Snap automático na cabeça", "AutoSnap", "Em curta distância mira na cabeça")
@@ -1274,9 +1306,9 @@ local function drawEsp(cam, list)
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
---  TRAVA DE CÂMERA
+--  TRAVA DE CÂMERA (v2.6: rastreamento adaptativo + turbo)
 -- ═════════════════════════════════════════════════════════════════════════════
-local MAX_TURN = math.rad(540)
+local MAX_TURN = math.rad(900)  -- v2.6: era 540 → 900°/s (acompanha giros rápidos)
 
 local function updateCameraLock(cam, dt, cur)
 	local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
@@ -1284,17 +1316,30 @@ local function updateCameraLock(cam, dt, cur)
 	local want = alive and S.Lock and cur ~= nil
 
 	if want then
-		Lock.weight = math.min(1, Lock.weight + dt / 0.35)
+		Lock.weight = math.min(1, Lock.weight + dt / 0.30)
 	else
-		Lock.weight = math.max(0, Lock.weight - dt / 0.25)
+		-- v2.6: ReleaseDelay maior = mais paciência
+		local releaseRate = 1 / math.max(S.ReleaseDelay or 0.45, 0.1)
+		Lock.weight = math.max(0, Lock.weight - dt * releaseRate)
 	end
 
 	if want then
 		local p = cur.aim or cur.hrp.Position
-		-- 1º filtro: reduz tremor de curto prazo
-		Lock.aim = Lock.aim and Lock.aim:Lerp(p, 1 - math.exp(-TUNING.AimFilter * dt)) or p
-		-- 2º filtro: reduz lag e suaviza ainda mais
-		Lock.aimSlow = Lock.aimSlow and Lock.aimSlow:Lerp(Lock.aim, 1 - math.exp(-TUNING.AimFilterSlow * dt)) or Lock.aim
+
+		-- v2.6: filtro adaptativo baseado na velocidade do alvo
+		local speedFactor = 0
+		if S.AdaptiveRate then
+			if targetSpeedSmooth > TUNING.SpeedTurbo then
+				speedFactor = 1
+			elseif targetSpeedSmooth > TUNING.SpeedFast then
+				speedFactor = (targetSpeedSmooth - TUNING.SpeedFast) / (TUNING.SpeedTurbo - TUNING.SpeedFast)
+			end
+		end
+		local filterFast = TUNING.AimFilter + (TUNING.AimFilterTurbo - TUNING.AimFilter) * speedFactor
+		local filterSlow = TUNING.AimFilterSlow + (TUNING.AimFilterTurbo * 0.7 - TUNING.AimFilterSlow) * speedFactor
+
+		Lock.aim = Lock.aim and Lock.aim:Lerp(p, 1 - math.exp(-filterFast * dt)) or p
+		Lock.aimSlow = Lock.aimSlow and Lock.aimSlow:Lerp(Lock.aim, 1 - math.exp(-filterSlow * dt)) or Lock.aim
 	end
 
 	if Lock.weight <= 0 or not Lock.aimSlow then
@@ -1309,18 +1354,23 @@ local function updateCameraLock(cam, dt, cur)
 	local off = Lock.aimSlow - pos
 	if off.Magnitude > 1 then
 		local d = off.Unit
-		if math.abs(d.Y) > 0.94 then
+		-- v2.6: VerticalTrack — permite ângulo maior para acompanhar pulo
+		local maxY = S.VerticalTrack and 0.94 or 0.94
+		if math.abs(d.Y) > maxY then
 			local flat = Vector3.new(d.X, 0, d.Z)
 			if flat.Magnitude < 1e-3 then
 				d = nil
 			else
-				d = flat.Unit * 0.342 + Vector3.new(0, math.sign(d.Y) * 0.94, 0)
+				d = flat.Unit * math.sqrt(1 - maxY * maxY) + Vector3.new(0, math.sign(d.Y) * maxY, 0)
 			end
 		end
 		if d then
 			local ang = math.acos(math.clamp(Lock.rot.LookVector:Dot(d), -1, 1))
 			if ang > math.rad(0.1) then
-				local rate = 2 + 38 * (1 - S.Smooth / 100) ^ 2
+				-- v2.6: rate mais agressivo quando alvo rápido
+				local baseRate = 2 + 48 * (1 - S.Smooth / 100) ^ 2
+				local adaptiveBoost = 1 + speedFactor * 1.5
+				local rate = baseRate * adaptiveBoost
 				local a = math.min(1 - math.exp(-rate * dt), MAX_TURN * dt / ang)
 				Lock.rot = Lock.rot:Lerp(CFrame.lookAt(Vector3.zero, d), a)
 			end
@@ -1403,7 +1453,7 @@ local function update(dt)
 		pick = false
 	end
 
-	if cur then updateAimPoint(cur, dt) else Aim.model = nil end
+	if cur then updateAimPoint(cur, dt) else Aim.model = nil; targetSpeed, targetSpeedSmooth = 0, 0 end
 	updateCameraLock(cam, dt, cur)
 	drawEsp(cam, list)
 
@@ -1450,11 +1500,11 @@ local function update(dt)
 				Aim.wO / sum > 0.05 and (" · " .. (Aim.key or "?")) or "")
 		end
 		diagLabel.Text = string.format(
-			"Jogadores: %d · válidos: %d\nAliados ignorados: %d · sem personagem: %d · mortos: %d · sem parte: %d\nNo alcance: %d · no círculo: %d · bloqueados: %d\nCâmera: %s · alvo: %s\nMira: %s · predição: %s",
+			"Jogadores: %d · válidos: %d\nAliados ignorados: %d · sem personagem: %d · mortos: %d · sem parte: %d\nNo alcance: %d · no círculo: %d · bloqueados: %d\nCâmera: %s · alvo: %s\nMira: %s · predição: %s\nVelocidade do alvo: %.1f st/s",
 			stats.players, stats.valid, stats.ally, stats.noChar, stats.dead, stats.noPart,
 			stats.inRange, stats.inCircle, stats.blocked,
 			cam.CameraType.Name, target and target.Name or "nenhum", mira,
-			S.Predict and "ON" or "OFF")
+			S.Predict and "ON" or "OFF", targetSpeedSmooth)
 	end
 
 	hudLock.btn.Visible = S.Hud
@@ -1510,4 +1560,4 @@ end))
 conn(WS:GetPropertyChangedSignal("CurrentCamera"):Connect(resetLock))
 
 tw(UI.winScale, { Scale = 1 }, 0.4, Enum.EasingStyle.Back)
-toast("OBSIDIAN v2.5 carregado")
+toast("OBSIDIAN v2.6 — Rastreamento Total")
