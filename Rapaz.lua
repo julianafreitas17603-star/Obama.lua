@@ -1,5 +1,7 @@
--- OBSIDIAN Pro v2.2 — trava persistente (LocalScript)
+-- OBSIDIAN Pro v2.3 — trava funciona no lobby e na partida (LocalScript)
 -- Alvos: outros jogadores (respeita equipe) e NPCs com a tag "AuthorizedTarget".
+-- Local: StarterPlayer > StarterPlayerScripts (LocalScript). Se lobby e partida forem
+-- places diferentes, o script precisa estar nos dois.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
@@ -25,39 +27,33 @@ local C = {
 }
 local GOTHAM, GOTHAM_B = Enum.Font.GothamMedium, Enum.Font.GothamBold
 
--- ═══ CONFIGURAÇÕES (todas ajustáveis pela interface) ═══
+-- ═══ CONFIGURAÇÕES ═══
 local S = {
 	Enabled = true, Lock = true, Auto = true, ShowFov = true,
-	Radius = 25,      -- círculo: % do menor lado da tela
-	Smooth = 60,      -- suavidade da câmera (%)
-	Tol = 24,         -- tolerância de saída do círculo (px)
-	MaxDist = 300,    -- distância máxima (studs)
-	Team = true,      -- nunca selecionar aliados
-	WallCheck = true, -- exige linha de visão para NOVAS seleções
-	ObstructTol = 0.8,-- s de obstrução tolerados antes de soltar o alvo
-	MinSwitch = 1.5,  -- s mínimos entre trocas voluntárias (anti-oscilação)
-	AdvPct = 35,      -- % de vantagem angular exigida para troca antecipada
+	Radius = 25,       -- círculo: % do menor lado da tela
+	Smooth = 60,       -- suavidade da câmera (%)
+	Tol = 24,          -- tolerância de saída do círculo (px)
+	MaxDist = 700,     -- distância máxima (studs)
+	Team = true,       -- nunca selecionar aliados
+	WallCheck = false, -- LIGUE só se precisar; paredes/barreiras da partida podem bloquear tudo
+	ObstructTol = 0.8, -- s de obstrução tolerados antes de soltar o alvo
+	MinSwitch = 1.5,   -- s mínimos entre trocas voluntárias
+	AdvPct = 35,       -- % de vantagem angular para troca antecipada
 	ESP = true, Box = true, Name = true, Dist = true, Health = true, Tracer = false,
 	EspDist = 500,
 	Hud = IS_TOUCH, HudScale = 100,
 }
 local DEFAULT = table.clone(S)
-local refresh = {} -- chave -> função que redesenha o controle
+local refresh = {}
 
--- Ajustes finos do sistema de seleção
 local TUNING = {
-	OutGrace = 0.2,       -- s fora de (círculo + tolerância) antes de soltar
-	RangeMargin = 1.05,   -- histerese do limite de distância (evita piscar na borda)
-	TieDeg = 0.25,        -- diferença angular (°) tratada como empate → desempata por distância física
-	AbsAdvDeg = 2.5,      -- vantagem angular mínima absoluta (°) para troca antecipada
-	BlockedPenalty = 10,  -- ° somados ao alvo atual quando está obstruído
-	OutsidePenalty = 5,   -- ° somados quando está fora do círculo (na faixa de tolerância)
-	LosInterval = 0.1,    -- s entre raycasts de visibilidade (cache por personagem)
+	OutGrace = 0.2, RangeMargin = 1.05, TieDeg = 0.25, AbsAdvDeg = 2.5,
+	BlockedPenalty = 10, OutsidePenalty = 5, LosInterval = 0.1,
 }
 
 -- ═══ LIMPEZA ═══
 pcall(function() RunService:UnbindFromRenderStep(STEP) end)
-local old = lp.PlayerGui:FindFirstChild("ObsidianPro")
+local old = lp:WaitForChild("PlayerGui"):FindFirstChild("ObsidianPro")
 if old then old:Destroy() end
 local conns = {}
 local function conn(c) conns[#conns + 1] = c return c end
@@ -75,7 +71,9 @@ local function stroke(o, col, th, tr)
 end
 local function grad(o, c0, c1, rot) return new("UIGradient", { Color = ColorSequence.new(c0, c1), Rotation = rot or 90 }, o) end
 local function tw(o, props, t, style, dir)
-	TS:Create(o, TweenInfo.new(t or 0.18, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props):Play()
+	pcall(function()
+		TS:Create(o, TweenInfo.new(t or 0.18, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props):Play()
+	end)
 end
 local function isPtr(i) return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch end
 local function sameIn(a, i)
@@ -83,7 +81,17 @@ local function sameIn(a, i)
 end
 
 -- ═══ TELA ═══
-local gui = new("ScreenGui", { Name = "ObsidianPro", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 10, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, lp.PlayerGui)
+local gui = new("ScreenGui", {
+	Name = "ObsidianPro", ResetOnSpawn = false, IgnoreGuiInset = true,
+	DisplayOrder = 100, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, lp.PlayerGui)
+-- Se algum script da partida remover/mover a interface, tenta reanexar.
+conn(gui.AncestryChanged:Connect(function()
+	if not gui:IsDescendantOf(game) then
+		pcall(function() gui.Parent = lp.PlayerGui end)
+	end
+end))
+
 local espLayer = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = false }, gui)
 local circle = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1, Active = false }, gui)
 round(circle, 9999)
@@ -156,7 +164,6 @@ new("UIGradient", {
 	Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1) }),
 }, topLine)
 
--- Cabeçalho
 local header = new("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundTransparency = 1, Active = true }, win)
 local badge = new("Frame", { Position = UDim2.fromOffset(12, 10), Size = UDim2.fromOffset(36, 36), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0 }, header)
 round(badge, 11)
@@ -183,7 +190,6 @@ end
 local closeBtn = hBtn("×", -10, C.red)
 local minBtn = hBtn("–", -50, C.text)
 
--- Abas (controle segmentado com indicador animado)
 local TABS = { "Mira", "ESP", "Filtros", "Config" }
 local tabBar = new("Frame", { Position = UDim2.fromOffset(12, 58), Size = UDim2.new(1, -24, 0, 38), BackgroundColor3 = C.card, BorderSizePixel = 0, Active = true }, win)
 round(tabBar, 12); stroke(tabBar, C.line, 1, 0)
@@ -234,6 +240,17 @@ local function section(page, text)
 		Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -12, 1, 0), BackgroundTransparency = 1, Text = string.upper(text),
 		Font = GOTHAM_B, TextSize = 12, TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left,
 	}, f)
+end
+
+local function infoCard(page)
+	local l = new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.card, Text = "…",
+		Font = GOTHAM, TextSize = 12, TextColor3 = C.muted, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top, LayoutOrder = ord(page),
+	}, page)
+	round(l, 12); stroke(l, C.line, 1, 0)
+	new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, l)
+	return l
 end
 
 local function toggle(page, name, key, desc)
@@ -309,7 +326,7 @@ local function slider(page, name, key, mn, mx, suffix, step)
 	conn(hit.InputBegan:Connect(function(i)
 		if isPtr(i) then
 			act = i
-			page.ScrollingEnabled = false -- não rola a lista enquanto ajusta
+			page.ScrollingEnabled = false
 			tw(knob, { Size = UDim2.fromOffset(26, 26) }, 0.12)
 			set(i.Position.X)
 		end
@@ -337,7 +354,6 @@ local function button(page, text, primary, fn)
 	conn(b.Activated:Connect(fn))
 end
 
--- Aviso (toast) embaixo, no centro: longe do joystick e do botão de pulo
 local toastObj
 local function toast(msg)
 	if toastObj then toastObj:Destroy() end
@@ -362,24 +378,29 @@ local function toast(msg)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- SISTEMA DE TRAVA PERSISTENTE — estado e critérios de troca
+-- ESTADO E SELEÇÃO PERSISTENTE
 -- ═══════════════════════════════════════════════════════════════════════════
-local target = nil          -- Model do alvo atual
-local outTime = 0           -- s fora de (círculo + tolerância)
-local blockTime = 0         -- s obstruído por parede/obstáculo
-local lastSwitch = -1e9     -- instante da última troca (anti-oscilação)
-local holdOff = 0           -- bloqueia seleção automática após "Limpar alvo"
-local pick = false          -- pedido de seleção manual
-local dropped = {}          -- model -> instante em que foi solto
-local weight, aim = 0, nil  -- trava de câmera (peso 0..1 e ponto de mira filtrado)
+local target = nil
+local outTime, blockTime = 0, 0
+local lastSwitch = -1e9
+local holdOff = 0
+local pick = false
+local dropped = {}
 local ctx = { camPos = Vector3.zero, now = 0 }
+local stats = { players = 0, noChar = 0, dead = 0, ally = 0, noPart = 0, valid = 0, inRange = 0, inCircle = 0, blocked = 0 }
+
+-- Trava de câmera: guarda a PRÓPRIA rotação (funciona com câmera Custom e Scriptable)
+local Lock = { weight = 0, aim = nil, rot = nil, final = nil, active = false }
+local function resetLock()
+	Lock.weight, Lock.aim, Lock.rot, Lock.final, Lock.active = 0, nil, nil, nil, false
+end
 
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.RespectCanCollide = true
+local rayBase = {}
 local losCache = {}
 
---- Troca (ou solta, se en == nil) o alvo, registrando o instante da troca.
 local function setTarget(en, now)
 	local newModel = en and en.m or nil
 	if newModel ~= target then
@@ -390,8 +411,22 @@ local function setTarget(en, now)
 	end
 end
 
---- Visível = nenhum obstáculo entre a câmera e o alvo. Outros PERSONAGENS não contam
---- como obstáculo (alguém passando na frente da mira não derruba nem troca a trava).
+--- Há cenário sólido entre a câmera e o alvo? Partes quase invisíveis (>= 0.9) são ignoradas.
+local function lineBlocked(en)
+	local filter = table.clone(rayBase)
+	rayParams.FilterDescendantsInstances = filter
+	local origin = ctx.camPos
+	local dir = en.hrp.Position - origin
+	for _ = 1, 4 do
+		local hit = WS:Raycast(origin, dir, rayParams)
+		if not hit then return false end
+		if hit.Instance.Transparency < 0.9 then return true end
+		filter[#filter + 1] = hit.Instance
+		rayParams.FilterDescendantsInstances = filter
+	end
+	return true
+end
+
 local function visible(en)
 	if not S.WallCheck then return true end
 	if en.vis ~= nil then return en.vis end
@@ -400,20 +435,16 @@ local function visible(en)
 		en.vis = c.ok
 		return c.ok
 	end
-	local hit = WS:Raycast(ctx.camPos, en.hrp.Position - ctx.camPos, rayParams)
-	local ok = hit == nil
+	local ok = not lineBlocked(en)
 	losCache[en.m] = { t = ctx.now, ok = ok }
 	en.vis = ok
 	return ok
 end
 
---- Elegível para SER escolhido: dentro do círculo, no alcance e visível.
---- (en já passou pelo filtro de validade e de equipe em listTargets, revalidado todo frame.)
 local function eligible(en, r)
 	return en.sd <= r and en.dist <= S.MaxDist and visible(en)
 end
 
---- Critério 5: menor distância angular ao centro da mira; empate → menor distância física.
 local function better(a, b)
 	if math.abs(a.ang - b.ang) > TUNING.TieDeg then return a.ang < b.ang end
 	return a.dist < b.dist
@@ -423,7 +454,6 @@ local function pickBest(list, r, exclude, voluntary, now)
 	local best
 	for _, en in ipairs(list) do
 		if en.m ~= exclude and eligible(en, r) then
-			-- Anti-ping-pong: quem acabou de ser solto não volta numa troca voluntária.
 			local recent = voluntary and dropped[en.m] and (now - dropped[en.m]) < S.MinSwitch
 			if not recent and (not best or better(en, best)) then best = en end
 		end
@@ -431,39 +461,31 @@ local function pickBest(list, r, exclude, voluntary, now)
 	return best
 end
 
---- Um passo do sistema de seleção. Retorna a entrada do alvo atual (ou nil).
 local function selectTarget(list, byModel, r, dt, now)
 	local cur = target and byModel[target] or nil
 	local forced = false
 
 	if target then
 		if not cur then
-			-- (2) morreu, saiu do jogo, perdeu o personagem, virou aliado ou ficou inválido
-			forced = true
+			forced = true -- morreu, saiu, perdeu personagem, virou aliado ou ficou inválido
 		elseif cur.dist > S.MaxDist * TUNING.RangeMargin then
-			-- (3) ultrapassou a distância máxima
-			forced = true
+			forced = true -- passou da distância máxima
 		else
-			-- (4) e (9): obstrução com tolerância; se voltar a ficar visível, o contador zera
 			cur.blocked = S.WallCheck and not visible(cur)
-			blockTime = cur.blocked and (blockTime + dt) or 0
-			-- saída do círculo (+ tolerância) por tempo persistente
+			blockTime = cur.blocked and (blockTime + dt) or 0 -- volta a ficar visível → zera
 			outTime = (cur.sd > r + S.Tol) and (outTime + dt) or 0
 			if blockTime > S.ObstructTol or outTime > TUNING.OutGrace then forced = true end
 		end
 	end
 
 	if forced then
-		-- Troca imediata (não depende do intervalo mínimo). (10) sem candidatos → solta com segurança.
 		local best = pickBest(list, r, target, false, now)
 		setTarget(best, now)
 		cur = best
 	elseif target and S.Auto then
-		-- (1) persistência: só considera troca antecipada se o alvo atual ficou pior...
-		if now - lastSwitch >= S.MinSwitch then -- (6) anti-oscilação
+		if now - lastSwitch >= S.MinSwitch then
 			local penalty = (cur.blocked and TUNING.BlockedPenalty or 0) + (cur.sd > r and TUNING.OutsidePenalty or 0)
 			if penalty > 0 then
-				-- (7) ...e se outro tiver vantagem CLARA (relativa e absoluta)
 				local best = pickBest(list, r, target, true, now)
 				if best then
 					local curEff = cur.ang + penalty
@@ -475,12 +497,10 @@ local function selectTarget(list, byModel, r, dt, now)
 			end
 		end
 	elseif not target and S.Auto and now >= holdOff then
-		-- Sem alvo: escolhe o melhor elegível (se não houver, continua aguardando)
 		local best = pickBest(list, r, nil, false, now)
 		if best then setTarget(best, now); cur = best end
 	end
 
-	-- Seleção manual (botão): escolhe o melhor elegível pela mesma prioridade
 	if pick then
 		pick = false
 		local best = pickBest(list, r, nil, false, now)
@@ -492,22 +512,22 @@ local function selectTarget(list, byModel, r, dt, now)
 			toast("Nenhum alvo no círculo")
 		end
 	end
-
 	return cur
 end
 
--- ═══ AÇÕES (janela e botões na tela) ═══
 local actions = {}
 function actions.pick() pick = true end
 function actions.release()
 	setTarget(nil, os.clock())
-	holdOff = os.clock() + 1 -- no automático, só escolhe outro após 1 s
+	holdOff = os.clock() + 1
 	toast("Alvo solto")
 end
 
 -- ═══ ABAS ═══
 local pMira, pEsp, pFiltros, pConfig = pages[1], pages[2], pages[3], pages[4]
 
+section(pMira, "Diagnóstico")
+local diagLabel = infoCard(pMira)
 section(pMira, "Sistema")
 toggle(pMira, "Sistema ativo", "Enabled")
 toggle(pMira, "Câmera acompanha o alvo", "Lock")
@@ -532,8 +552,8 @@ toggle(pEsp, "Barra de vida", "Health")
 toggle(pEsp, "Linhas (tracers)", "Tracer")
 
 section(pFiltros, "Validade")
-toggle(pFiltros, "Ignorar aliados", "Team", "Revalidado a cada frame")
-slider(pFiltros, "Distância máxima", "MaxDist", 50, 1000, " st", 10)
+toggle(pFiltros, "Ignorar aliados", "Team", "Desligue se todos estão na mesma equipe")
+slider(pFiltros, "Distância máxima", "MaxDist", 50, 2000, " st", 25)
 section(pFiltros, "Persistência do alvo")
 toggle(pFiltros, "Exigir linha de visão", "WallCheck", "Paredes atrasam a troca")
 slider(pFiltros, "Tolerância de obstrução", "ObstructTol", 0.2, 3, " s", 0.1)
@@ -598,7 +618,7 @@ conn(UIS.InputBegan:Connect(function(i, gp)
 	if not gp and i.KeyCode == Enum.KeyCode.RightControl then setShown(not shown) end
 end))
 
--- ═══ BOTÕES NA TELA (LOCK / ALVO) ═══
+-- ═══ BOTÕES NA TELA ═══
 local function hudBtn(text, y, fn)
 	local b = new("TextButton", {
 		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(vp0.X - 52, y), Size = UDim2.fromOffset(64, 64),
@@ -620,7 +640,6 @@ local hudTarget, hudTargetStroke, hudTargetScale = hudBtn("ALVO", vp0.Y * 0.3 + 
 	if target then actions.release() else actions.pick() end
 end)
 
--- Reposiciona proporcionalmente ao girar a tela
 local lastVp = vp0
 conn(gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 	local w, h, vp = metrics()
@@ -635,25 +654,65 @@ conn(gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 end))
 
 -- ═══ PERSONAGENS VÁLIDOS ═══
--- Revalidado TODO frame: vivo, tem personagem, não é você e (8) não é aliado.
--- Como a equipe é conferida a cada frame, qualquer mudança de time (do alvo ou sua)
--- invalida o alvo atual na hora e impede novas seleções de aliados.
+local function aimPartOf(m)
+	local names = { "HumanoidRootPart", "UpperTorso", "Torso", "Head" }
+	for _, n in ipairs(names) do
+		local p = m:FindFirstChild(n)
+		if p and p:IsA("BasePart") then return p end
+	end
+	return m.PrimaryPart
+end
+
+-- Alguns jogos não preenchem Player.Character na partida (personagem customizado).
+-- Fallback: procura um Model com o nome do jogador (1x por segundo, escalonado).
+local charCache = {}
+local function characterOf(p)
+	local c = p.Character
+	if c and c.Parent then return c end
+	local e = charCache[p]
+	if not e then
+		e = { m = nil, t = ctx.now - 1 + math.random() }
+		charCache[p] = e
+	end
+	if e.m and not e.m.Parent then e.m = nil end
+	if ctx.now - e.t >= 1 then
+		e.t = ctx.now
+		local found = WS:FindFirstChild(p.Name, true)
+		if found and found:IsA("Model") and found:FindFirstChildOfClass("Humanoid") then
+			e.m = found
+		else
+			e.m = nil
+		end
+	end
+	return e.m
+end
+conn(Players.PlayerRemoving:Connect(function(p) charCache[p] = nil end))
+
+-- Revalidado TODO frame: vivo, parte de mira, não é você e não é aliado.
 local function listTargets()
 	local out, seen = {}, {}
+	stats.players, stats.noChar, stats.dead, stats.ally, stats.noPart, stats.valid = 0, 0, 0, 0, 0, 0
 	local function add(m, p)
 		if seen[m] or m == lp.Character or not m.Parent then return end
 		seen[m] = true
-		local hum, hrp = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
-		if not hum or hum.Health <= 0 or not hrp then return end
-		if S.Team and p and lp.Team and p.Team == lp.Team then return end
-		out[#out + 1] = { m = m, hum = hum, hrp = hrp, player = p }
+		local hum = m:FindFirstChildOfClass("Humanoid")
+		local part = aimPartOf(m)
+		if not hum or not part then stats.noPart += 1 return end
+		if hum.Health <= 0 then stats.dead += 1 return end
+		if S.Team and p and lp.Team and p.Team == lp.Team then stats.ally += 1 return end
+		out[#out + 1] = { m = m, hum = hum, hrp = part, player = p }
 	end
 	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= lp and p.Character then add(p.Character, p) end
+		if p ~= lp then
+			stats.players += 1
+			local c = characterOf(p)
+			if c then add(c, p) else stats.noChar += 1 end
+		end
 	end
 	for _, m in ipairs(CS:GetTagged("AuthorizedTarget")) do
 		if m:IsA("Model") then add(m, Players:GetPlayerFromCharacter(m)) end
 	end
+	stats.valid = #out
 	return out
 end
 
@@ -749,31 +808,90 @@ local function drawEsp(cam, list)
 	end
 end
 
--- ═══ LOOP PRINCIPAL (logo depois da câmera padrão) ═══
-local cache = { sub = "", lock = -1, tgt = -1, scale = -1 }
+-- ═══ TRAVA DE CÂMERA ═══
+-- Mantém uma rotação PRÓPRIA (Lock.rot) que persegue o alvo com suavização exponencial
+-- (independente de FPS, com limite de velocidade angular). O resultado final mistura a
+-- rotação que a câmera do jogo produziu neste frame com a nossa, por um "peso" com easing:
+-- entrar e soltar a trava nunca causa puxão. Funciona com câmera Custom e Scriptable.
+local MAX_TURN = math.rad(540)
+
+local function updateCameraLock(cam, dt, cur)
+	local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+	local alive = not (hum and hum.Health <= 0)
+	local want = alive and S.Lock and cur ~= nil
+
+	if want then Lock.weight = math.min(1, Lock.weight + dt / 0.35)
+	else Lock.weight = math.max(0, Lock.weight - dt / 0.25) end
+
+	if want then
+		local p = cur.hrp.Position
+		Lock.aim = Lock.aim and Lock.aim:Lerp(p, 1 - math.exp(-28 * dt)) or p
+	end
+
+	if Lock.weight <= 0 or not Lock.aim then
+		resetLock()
+		return
+	end
+
+	local base = cam.CFrame
+	local pos = base.Position
+	if not Lock.rot then Lock.rot = base.Rotation end
+
+	local off = Lock.aim - pos
+	if off.Magnitude > 1 then
+		local d = off.Unit
+		if math.abs(d.Y) > 0.94 then -- limita a inclinação (~70°)
+			local flat = Vector3.new(d.X, 0, d.Z)
+			if flat.Magnitude < 1e-3 then
+				d = nil
+			else
+				d = flat.Unit * 0.342 + Vector3.new(0, math.sign(d.Y) * 0.94, 0)
+			end
+		end
+		if d then
+			local ang = math.acos(math.clamp(Lock.rot.LookVector:Dot(d), -1, 1))
+			if ang > math.rad(0.1) then
+				local rate = 2 + 38 * (1 - S.Smooth / 100) ^ 2
+				local a = math.min(1 - math.exp(-rate * dt), MAX_TURN * dt / ang)
+				Lock.rot = Lock.rot:Lerp(CFrame.lookAt(Vector3.zero, d), a)
+			end
+		end
+	end
+
+	local e = Lock.weight * Lock.weight * (3 - 2 * Lock.weight) -- smoothstep
+	Lock.final = base.Rotation:Lerp(Lock.rot, e)
+	Lock.active = true
+	cam.CFrame = CFrame.new(pos) * Lock.final
+end
+
+-- ═══ LOOP PRINCIPAL ═══
+local cache = { sub = "", lock = -1, tgt = -1, scale = -1, diagT = 0 }
 
 local function update(dt)
 	local cam = WS.CurrentCamera
 	if not cam then return end
 	dt = math.min(dt, 0.1)
 	local now = os.clock()
+	ctx.now = now
 
 	local vp = cam.ViewportSize
 	local center = vp / 2
 	local r = S.Radius / 100 * math.min(vp.X, vp.Y)
 
-	-- Círculo (centro da tela = centro da câmera)
 	circle.Size = UDim2.fromOffset(r * 2, r * 2)
 	circle.Visible = S.Enabled and S.ShowFov
 	circleStroke.Color = target and C.green or Color3.fromRGB(40, 200, 105)
 	circleStroke.Transparency = target and 0.05 or 0.35
 
-	-- Lista de personagens válidos + distância física, ângulo e distância na tela
 	local list = (S.Enabled or S.ESP) and listTargets() or {}
 	local camCF = cam.CFrame
 	local camPos, look = camCF.Position, camCF.LookVector
-	ctx.camPos, ctx.now = camPos, now
+	ctx.camPos = camPos
+
 	local byModel = {}
+	stats.inRange, stats.inCircle, stats.blocked = 0, 0, 0
+	table.clear(rayBase)
+	if lp.Character then rayBase[1] = lp.Character end
 	for _, en in ipairs(list) do
 		local p = en.hrp.Position
 		local off = p - camPos
@@ -782,22 +900,22 @@ local function update(dt)
 		local v = cam:WorldToViewportPoint(p)
 		en.sd = v.Z > 0 and (Vector2.new(v.X, v.Y) - center).Magnitude or math.huge
 		byModel[en.m] = en
+		rayBase[#rayBase + 1] = en.m
 	end
-
-	-- Raycast de visibilidade ignora TODOS os personagens (só cenário conta como obstáculo)
-	if S.WallCheck and S.Enabled then
-		local filter = {}
-		if lp.Character then filter[1] = lp.Character end
-		for _, en in ipairs(list) do filter[#filter + 1] = en.m end
-		rayParams.FilterDescendantsInstances = filter
+	for _, en in ipairs(list) do
+		if en.dist <= S.MaxDist then
+			stats.inRange += 1
+			if en.sd <= r then
+				stats.inCircle += 1
+				if S.WallCheck and S.Enabled and not visible(en) then stats.blocked += 1 end
+			end
+		end
 	end
-	-- Limpa caches de quem não está mais na lista
 	for m in pairs(losCache) do if not byModel[m] then losCache[m] = nil end end
 	for m, t in pairs(dropped) do
 		if now - t > 10 or not byModel[m] then dropped[m] = nil end
 	end
 
-	-- Seleção persistente
 	local cur
 	if S.Enabled then
 		cur = selectTarget(list, byModel, r, dt, now)
@@ -806,36 +924,10 @@ local function update(dt)
 		pick = false
 	end
 
-	-- Trava de câmera suave: peso sobe/desce (sem puxão), taxa independente de FPS
-	local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
-	local can = cam.CameraType == Enum.CameraType.Custom and hum ~= nil and hum.Health > 0
-	local want = can and S.Lock and cur ~= nil
-	if want then weight = math.min(1, weight + dt / 0.35) else weight = math.max(0, weight - dt / 0.25) end
-	if want then
-		local p = cur.hrp.Position
-		aim = aim and aim:Lerp(p, 1 - math.exp(-28 * dt)) or p
-	end
-	if not can then weight = 0 end
-	if weight <= 0 then aim = nil end
-	if can and weight > 0 and aim then
-		local e = weight * weight * (3 - 2 * weight)
-		local cf = cam.CFrame
-		local off = aim - cf.Position
-		if off.Magnitude > 1 then
-			local d = off.Unit
-			d = Vector3.new(d.X, math.clamp(d.Y, -0.94, 0.94), d.Z).Unit -- limita a inclinação
-			local ang = math.acos(math.clamp(cf.LookVector:Dot(d), -1, 1))
-			if ang > 0.002 then
-				local rate = 2 + 38 * (1 - S.Smooth / 100) ^ 2
-				local a = math.min((1 - math.exp(-rate * dt)) * e, 9.4 * dt / ang) -- limite de velocidade angular
-				cam.CFrame = cf:Lerp(CFrame.lookAt(cf.Position, cf.Position + d), a)
-			end
-		end
-	end
-
+	updateCameraLock(cam, dt, cur)
 	drawEsp(cam, list)
 
-	-- Status no cabeçalho
+	-- Status
 	local text, col
 	if not S.Enabled then
 		text, col = "Desligado", C.muted
@@ -844,12 +936,21 @@ local function update(dt)
 		if cur.blocked then
 			text, col = "Obstruído · " .. nm, Color3.fromRGB(255, 200, 80)
 		else
-			text, col = ((weight > 0.5) and "Travado · " or "Alvo · ") .. nm, C.green
+			text, col = ((Lock.weight > 0.5) and "Travado · " or "Alvo · ") .. nm, C.green
 		end
 	else
 		text, col = "Pronto · sem alvo", C.muted
 	end
 	if text ~= cache.sub then cache.sub = text; sub.Text = text; sub.TextColor3 = col end
+
+	-- Diagnóstico (4x por segundo)
+	if now - cache.diagT > 0.25 then
+		cache.diagT = now
+		diagLabel.Text = string.format(
+			"Jogadores: %d · válidos: %d\nAliados ignorados: %d · sem personagem: %d · mortos: %d · sem parte: %d\nNo alcance: %d · no círculo: %d · bloqueados: %d\nCâmera: %s · alvo: %s",
+			stats.players, stats.valid, stats.ally, stats.noChar, stats.dead, stats.noPart,
+			stats.inRange, stats.inCircle, stats.blocked, cam.CameraType.Name, target and target.Name or "nenhum")
+	end
 
 	-- Botões na tela
 	hudLock.Visible = S.Hud
@@ -858,7 +959,7 @@ local function update(dt)
 		cache.scale = S.HudScale
 		hudLockScale.Scale, hudTargetScale.Scale = S.HudScale / 100, S.HudScale / 100
 	end
-	local ls = (S.Enabled and S.Lock) and ((weight > 0.5) and 2 or 1) or 0
+	local ls = (S.Enabled and S.Lock) and ((Lock.weight > 0.5) and 2 or 1) or 0
 	if ls ~= cache.lock then
 		cache.lock = ls
 		tw(hudLock, { BackgroundColor3 = ls == 2 and C.green or C.bg, TextColor3 = ls == 2 and C.bg or (ls == 1 and C.green or C.muted) }, 0.2)
@@ -873,11 +974,35 @@ local function update(dt)
 	end
 end
 
-RunService:BindToRenderStep(STEP, Enum.RenderPriority.Camera.Value + 1, function(dt)
+-- Roda no ÚLTIMO passo de renderização: depois da câmera padrão e de câmeras da partida
+-- ligadas por BindToRenderStep.
+RunService:BindToRenderStep(STEP, Enum.RenderPriority.Last.Value, function(dt)
 	local ok, err = pcall(update, dt)
 	if not ok then warn("[Obsidian] " .. tostring(err)) end
 end)
 
--- Animação de entrada
+-- Reaplica a rotação da trava em RenderStepped: se uma câmera da partida escrever
+-- DEPOIS do passo acima, a trava não é apagada (funciona em qualquer ordem).
+conn(RunService.RenderStepped:Connect(function()
+	local cam = WS.CurrentCamera
+	if cam and Lock.active and Lock.final then
+		cam.CFrame = CFrame.new(cam.CFrame.Position) * Lock.final
+	end
+end))
+
+-- ═══ EVENTOS: transição lobby → partida, respawn, equipe, câmera ═══
+conn(lp.CharacterAdded:Connect(function()
+	resetLock()
+	setTarget(nil, os.clock())
+end))
+conn(lp.CharacterRemoving:Connect(function()
+	resetLock()
+	setTarget(nil, os.clock())
+end))
+conn(lp:GetPropertyChangedSignal("Team"):Connect(function()
+	setTarget(nil, os.clock()) -- revalida equipes do zero
+end))
+conn(WS:GetPropertyChangedSignal("CurrentCamera"):Connect(resetLock))
+
 tw(winScale, { Scale = 1 }, 0.4, Enum.EasingStyle.Back)
 toast("OBSIDIAN carregado")
