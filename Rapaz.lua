@@ -1,18 +1,22 @@
--- OBSIDIAN Pro v2.4 — trava por esqueleto + interface redesenhada (LocalScript)
--- Alvos: outros jogadores (respeita equipe) e NPCs com a tag "AuthorizedTarget".
+-- OBSIDIAN Pro v2.5 — trava por esqueleto + precisão máxima + zero bugs
+-- Alvos: jogadores (respeita equipe) e NPCs com a tag "AuthorizedTarget".
 -- Local: StarterPlayer > StarterPlayerScripts (LocalScript).
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
-local TS = game:GetService("TweenService")
-local CS = game:GetService("CollectionService")
-local WS = game:GetService("Workspace")
-local TextService = game:GetService("TextService")
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UIS          = game:GetService("UserInputService")
+local TS           = game:GetService("TweenService")
+local CS           = game:GetService("CollectionService")
+local WS           = game:GetService("Workspace")
+local TextService  = game:GetService("TextService")
+
 local lp = Players.LocalPlayer
 local IS_TOUCH = UIS.TouchEnabled
 local STEP = "ObsidianPro"
 
--- ═══ TEMA OBSIDIAN BLACK ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  TEMA
+-- ═════════════════════════════════════════════════════════════════════════════
 local C = {
 	bg = Color3.fromRGB(0, 0, 0),
 	bg2 = Color3.fromRGB(11, 12, 13),
@@ -30,42 +34,65 @@ local C = {
 local F = { reg = Enum.Font.Gotham, med = Enum.Font.GothamMedium, bold = Enum.Font.GothamBold, black = Enum.Font.GothamBlack }
 local ROW = IS_TOUCH and 54 or 50
 
--- ═══ CONFIGURAÇÕES ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  CONFIG
+-- ═════════════════════════════════════════════════════════════════════════════
 local S = {
 	Enabled = true, Lock = true, Auto = true, ShowFov = true,
-	Radius = 25,       -- círculo: % do menor lado da tela
-	Smooth = 60,       -- suavidade da câmera (%)
-	Tol = 24,          -- tolerância de saída do círculo (px)
-	MaxDist = 700,     -- distância máxima (studs)
-	Team = true,       -- nunca selecionar aliados
-	WallCheck = false, -- exige visibilidade (parede/obstáculo)
-	ObstructTol = 0.8, -- s de obstrução tolerados antes de soltar o alvo
-	MinSwitch = 1.5,   -- s mínimos entre trocas voluntárias
-	AdvPct = 35,       -- % de vantagem angular para troca antecipada
-	AimBias = 35,      -- ponto de mira: 0 = tronco, 100 = cabeça
-	SkelPersist = true,-- mantém o alvo se QUALQUER parte do esqueleto estiver no círculo/visível
+	Radius = 25,
+	Smooth = 60,
+	Tol = 24,
+	MaxDist = 700,
+	Team = true,
+	WallCheck = false,
+	ObstructTol = 0.8,
+	MinSwitch = 1.5,
+	AdvPct = 35,
+	AimBias = 35,
+	SkelPersist = true,
 	ESP = true, Box = true, Name = true, Dist = true, Health = true, Tracer = false, AimDot = true,
 	EspDist = 500,
 	Hud = IS_TOUCH, HudScale = 100,
+	-- NOVOS (v2.5)
+	Predict = false,          -- predição de movimento
+	PredictSpeed = 400,       -- velocidade da bala (studs/s) usada na predição
+	PredictMaxLead = 0.4,     -- tempo máximo de lead (s)
+	SnapRange = 8,            -- distância em studs que ativa snap na cabeça
+	AutoSnap = true,          -- ativa snap automaticamente em curta distância
 }
 local DEFAULT = table.clone(S)
 local refresh = {}
 
 local TUNING = {
-	OutGrace = 0.2, RangeMargin = 1.05, TieDeg = 0.25, AbsAdvDeg = 2.5,
-	BlockedPenalty = 10, OutsidePenalty = 5, LosInterval = 0.1,
-	AimFilter = 24,   -- 1/s: filtro do ponto de mira (remove balanço de animação)
-	WeightRate = 12,  -- 1/s: velocidade da mistura tronco/cabeça/outra parte
+	OutGrace = 0.2,
+	RangeMargin = 1.05,
+	TieDeg = 0.25,
+	AbsAdvDeg = 2.5,
+	BlockedPenalty = 10,
+	OutsidePenalty = 5,
+	LosInterval = 0.1,
+	AimFilter = 26,           -- 1/s: 1º filtro (tremor)
+	AimFilterSlow = 12,       -- 1/s: 2º filtro (lag)
+	WeightRate = 14,          -- 1/s: mistura tronco/cabeça
+	SnapRate = 40,            -- 1/s: taxa de snap quando muito perto
+	VisCacheCore = 0.06,      -- s: cache de visibilidade do core
+	VisCacheAny = 0.14,       -- s: cache de visibilidade de qualquer parte
+	SkelCacheTime = 0.5,      -- s: cache do esqueleto
 }
 
--- ═══ LIMPEZA ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  LIMPEZA
+-- ═════════════════════════════════════════════════════════════════════════════
 pcall(function() RunService:UnbindFromRenderStep(STEP) end)
 local old = lp:WaitForChild("PlayerGui"):FindFirstChild("ObsidianPro")
 if old then old:Destroy() end
-local conns = {}
-local function conn(c) conns[#conns + 1] = c return c end
 
--- ═══ HELPERS ═══
+local conns = {}
+local function conn(c) conns[#conns + 1] = c; return c end
+
+-- ═════════════════════════════════════════════════════════════════════════════
+--  HELPERS
+-- ═════════════════════════════════════════════════════════════════════════════
 local function new(class, props, parent)
 	local o = Instance.new(class)
 	for k, v in pairs(props) do o[k] = v end
@@ -76,46 +103,58 @@ local function round(o, r) return new("UICorner", { CornerRadius = UDim.new(0, r
 local function stroke(o, col, th, tr)
 	return new("UIStroke", { Color = col, Thickness = th or 1, Transparency = tr or 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, o)
 end
-local function grad(o, c0, c1, rot) return new("UIGradient", { Color = ColorSequence.new(c0, c1), Rotation = rot or 90 }, o) end
+local function grad(o, c0, c1, rot)
+	return new("UIGradient", { Color = ColorSequence.new(c0, c1), Rotation = rot or 90 }, o)
+end
 local function tw(o, props, t, style, dir)
 	pcall(function()
 		TS:Create(o, TweenInfo.new(t or 0.18, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props):Play()
 	end)
 end
-local function isPtr(i) return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch end
+local function isPtr(i)
+	return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
+end
 local function sameIn(a, i)
 	return a ~= nil and (i == a or (a.UserInputType == Enum.UserInputType.MouseButton1 and i.UserInputType == Enum.UserInputType.MouseButton1))
 end
 
--- ═══ TELA ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  GUI RAIZ
+-- ═════════════════════════════════════════════════════════════════════════════
 local gui = new("ScreenGui", {
 	Name = "ObsidianPro", ResetOnSpawn = false, IgnoreGuiInset = true,
 	DisplayOrder = 100, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, lp.PlayerGui)
--- Se algum script do jogo remover/mover a interface, tenta reanexar.
 conn(gui.AncestryChanged:Connect(function()
 	if not gui:IsDescendantOf(game) then
 		pcall(function() gui.Parent = lp.PlayerGui end)
 	end
 end))
 
-local UI = {} -- referências da interface
-
+local UI = {}
 UI.espLayer = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = false }, gui)
-UI.circle = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1, Active = false }, gui)
+UI.circle = new("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+	BackgroundTransparency = 1, Active = false,
+}, gui)
 round(UI.circle, 9999)
 UI.circleStroke = stroke(UI.circle, C.green, 1.5, 0.2)
 UI.aimDot = new("Frame", {
-	AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(10, 10), BackgroundTransparency = 1, Active = false, Visible = false,
+	AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(10, 10),
+	BackgroundTransparency = 1, Active = false, Visible = false,
 }, gui)
 round(UI.aimDot, 9999)
 stroke(UI.aimDot, C.green, 2, 0)
 
 local function vpSize()
 	local s = gui.AbsoluteSize
-	if s.X < 1 or s.Y < 1 then local c = WS.CurrentCamera return c and c.ViewportSize or Vector2.new(800, 400) end
+	if s.X < 1 or s.Y < 1 then
+		local c = WS.CurrentCamera
+		return c and c.ViewportSize or Vector2.new(800, 400)
+	end
 	return s
 end
+
 local function clampToScreen(o)
 	local vp = vpSize()
 	local hx, hy = o.Size.X.Offset / 2, o.Size.Y.Offset / 2
@@ -123,6 +162,7 @@ local function clampToScreen(o)
 		math.clamp(o.Position.X.Offset, hx, math.max(hx, vp.X - hx)),
 		math.clamp(o.Position.Y.Offset, hy, math.max(hy, vp.Y - hy)))
 end
+
 local function drag(handle, target, onTap)
 	local on, moved, start, pos, act = false, false
 	conn(handle.InputBegan:Connect(function(i)
@@ -145,6 +185,7 @@ local function drag(handle, target, onTap)
 		end
 	end))
 end
+
 local function pressScale(btn)
 	local sc = new("UIScale", { Scale = 1 }, btn)
 	conn(btn.InputBegan:Connect(function(i) if isPtr(i) then tw(sc, { Scale = 0.95 }, 0.08) end end))
@@ -152,8 +193,9 @@ local function pressScale(btn)
 	return sc
 end
 
--- ═══ ÍCONES (desenhados com formas, sem depender de assets) ═══
--- Tipos: target, eye, filter, gear, close, minus, lock, reset
+-- ═════════════════════════════════════════════════════════════════════════════
+--  ÍCONES
+-- ═════════════════════════════════════════════════════════════════════════════
 local function makeIcon(kind, parent, size, color)
 	local root = new("Frame", { Size = UDim2.fromOffset(size, size), BackgroundTransparency = 1, Active = false }, parent)
 	local fills, strokes = {}, {}
@@ -189,19 +231,21 @@ local function makeIcon(kind, parent, size, color)
 		solid(12, 6, 18, 2, nil, 0.5); solid(12, 12, 18, 2, nil, 0.5); solid(12, 18, 18, 2, nil, 0.5)
 		solid(8, 6, 5, 5, nil, 0.5); solid(16, 12, 5, 5, nil, 0.5); solid(10, 18, 5, 5, nil, 0.5)
 	elseif kind == "gear" then
-		outline(12, 12, 13, 13, 1.6, 0.12)
-		outline(12, 12, 13, 13, 1.6, 0.12, 45)
+		outline(12, 12, 13, 13, 1.6, 0.12); outline(12, 12, 13, 13, 1.6, 0.12, 45)
 		outline(12, 12, 6, 6, 1.6, 0.5)
 	elseif kind == "close" then
 		solid(12, 12, 18, 2.4, 45, 0.5); solid(12, 12, 18, 2.4, -45, 0.5)
 	elseif kind == "minus" then
 		solid(12, 12, 16, 2.4, nil, 0.5)
 	elseif kind == "lock" then
-		outline(12, 8.5, 9, 11, 2, 0.5)
-		solid(12, 15.5, 15, 11, nil, 0.18)
+		outline(12, 8.5, 9, 11, 2, 0.5); solid(12, 15.5, 15, 11, nil, 0.18)
 	elseif kind == "reset" then
-		outline(12, 12, 15, 15, 1.8, 0.5)
-		solid(19, 6, 5, 5, 45)
+		outline(12, 12, 15, 15, 1.8, 0.5); solid(19, 6, 5, 5, 45)
+	elseif kind == "predict" then
+		outline(12, 12, 16, 16, 1.6, 0.5)
+		solid(12, 12, 2.4, 8, nil, 0.5)
+		solid(6, 6, 2, 2, nil, 0.5); solid(18, 6, 2, 2, nil, 0.5)
+		solid(6, 18, 2, 2, nil, 0.5); solid(18, 18, 2, 2, nil, 0.5)
 	end
 
 	return {
@@ -213,7 +257,9 @@ local function makeIcon(kind, parent, size, color)
 	}
 end
 
--- ═══ JANELA ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  JANELA
+-- ═════════════════════════════════════════════════════════════════════════════
 local HEADER_H, TAB_Y, TAB_H, PAGE_Y = 60, 62, 40, 112
 
 local function metrics()
@@ -238,7 +284,6 @@ UI.root = new("Frame", {
 }, gui)
 UI.winScale = new("UIScale", { Scale = 0.9 }, UI.root)
 
--- brilho suave atrás da janela
 for _, g in ipairs({ { 22, 0.975 }, { 10, 0.95 } }) do
 	local glow = new("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, g[1], 1, g[1]),
@@ -249,7 +294,7 @@ end
 
 local win = new("Frame", {
 	Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
-	Active = true, ClipsDescendants = true, -- Active: tocar na janela NÃO gira a câmera
+	Active = true, ClipsDescendants = true,
 }, UI.root)
 round(win, 16)
 grad(win, C.bg2, C.bg, 90)
@@ -257,10 +302,11 @@ grad(stroke(win, C.green, 1, 0.5), C.green, C.greenDim, 45)
 local topLine = new("Frame", { Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Active = false }, win)
 new("UIGradient", {
 	Color = ColorSequence.new(C.green), Rotation = 0,
-	Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1) }),
+	Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1),
+	}),
 }, topLine)
 
--- Cabeçalho
 UI.header = new("Frame", { Size = UDim2.new(1, 0, 0, HEADER_H), BackgroundTransparency = 1, Active = true }, win)
 local badge = new("Frame", { Position = UDim2.fromOffset(14, 11), Size = UDim2.fromOffset(38, 38), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Active = false }, UI.header)
 round(badge, 12)
@@ -284,9 +330,11 @@ UI.dot = new("Frame", {
 }, UI.header)
 round(UI.dot, 99)
 UI.sub = new("TextLabel", {
-	Position = UDim2.fromOffset(78, 32), Size = UDim2.new(1, -190, 0, 16), BackgroundTransparency = 1, Text = "Pronto · sem alvo",
-	Font = F.med, TextSize = 12, TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Active = false,
+	Position = UDim2.fromOffset(78, 32), Size = UDim2.new(1, -190, 0, 16), BackgroundTransparency = 1,
+	Text = "Pronto · sem alvo", Font = F.med, TextSize = 12, TextColor3 = C.muted,
+	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Active = false,
 }, UI.header)
+
 local pulseTween = TS:Create(UI.pulse,
 	TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, -1, false, 0),
 	{ Size = UDim2.fromOffset(22, 22), BackgroundTransparency = 1 })
@@ -307,9 +355,19 @@ end
 local closeBtn = headerBtn("close", -12, C.red)
 local minBtn = headerBtn("minus", -54, C.text)
 
--- Abas: controle segmentado com ícone e indicador deslizante
-local TABS = { { "Mira", "target" }, { "ESP", "eye" }, { "Filtros", "filter" }, { "Config", "gear" } }
-local tabBar = new("Frame", { Position = UDim2.fromOffset(14, TAB_Y), Size = UDim2.new(1, -28, 0, TAB_H), BackgroundColor3 = C.card, BorderSizePixel = 0, Active = true }, win)
+-- ═════════════════════════════════════════════════════════════════════════════
+--  ABAS
+-- ═════════════════════════════════════════════════════════════════════════════
+local TABS = {
+	{ "Mira", "target" },
+	{ "ESP", "eye" },
+	{ "Filtros", "filter" },
+	{ "Config", "gear" },
+}
+local tabBar = new("Frame", {
+	Position = UDim2.fromOffset(14, TAB_Y), Size = UDim2.new(1, -28, 0, TAB_H),
+	BackgroundColor3 = C.card, BorderSizePixel = 0, Active = true,
+}, win)
 round(tabBar, 12); stroke(tabBar, C.line, 1, 0)
 local indicator = new("Frame", {
 	Position = UDim2.new(0, 3, 0, 3), Size = UDim2.new(1 / #TABS, -6, 1, -6),
@@ -318,7 +376,11 @@ local indicator = new("Frame", {
 round(indicator, 9); stroke(indicator, C.green, 1, 0.45)
 
 local tabs = {}
+local activeTabIndex = 1
+
 local function selectTab(i, instant)
+	if not tabs[i] then i = 1 end
+	activeTabIndex = i
 	local narrow = UI.root.Size.X.Offset < 340
 	for j, t in ipairs(tabs) do
 		local on = (j == i)
@@ -334,10 +396,11 @@ local function selectTab(i, instant)
 		tw(tabs[i].page, { Position = UDim2.fromOffset(0, PAGE_Y) }, 0.25, Enum.EasingStyle.Quint)
 	end
 end
+
 for i, def in ipairs(TABS) do
 	local b = new("TextButton", {
-		Position = UDim2.fromScale((i - 1) / #TABS, 0), Size = UDim2.fromScale(1 / #TABS, 1), BackgroundTransparency = 1,
-		Text = "", AutoButtonColor = false, ZIndex = 2,
+		Position = UDim2.fromScale((i - 1) / #TABS, 0), Size = UDim2.fromScale(1 / #TABS, 1),
+		BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 2,
 	}, tabBar)
 	local content = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = false, ZIndex = 2 }, b)
 	new("UIListLayout", {
@@ -347,75 +410,100 @@ for i, def in ipairs(TABS) do
 	local ic = makeIcon(def[2], content, 16, C.muted)
 	ic.root.LayoutOrder = 1
 	local lbl = new("TextLabel", {
-		Size = UDim2.fromOffset(0, 16), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = def[1],
-		Font = F.bold, TextSize = 13, TextColor3 = C.muted, LayoutOrder = 2, Active = false,
+		Size = UDim2.fromOffset(0, 16), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1,
+		Text = def[1], Font = F.bold, TextSize = 13, TextColor3 = C.muted, LayoutOrder = 2, Active = false,
 	}, content)
 	local page = new("ScrollingFrame", {
-		Position = UDim2.fromOffset(0, PAGE_Y), Size = UDim2.new(1, 0, 1, -PAGE_Y), BackgroundTransparency = 1, BorderSizePixel = 0,
-		ScrollBarThickness = 3, ScrollBarImageColor3 = C.green, CanvasSize = UDim2.new(),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y, Active = true, Visible = false,
+		Position = UDim2.fromOffset(0, PAGE_Y), Size = UDim2.new(1, 0, 1, -PAGE_Y),
+		BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.green,
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Active = true, Visible = false,
 	}, win)
 	new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, page)
-	new("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 16), PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }, page)
+	new("UIPadding", {
+		PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 16),
+		PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14),
+	}, page)
 	tabs[i] = { btn = b, ic = ic, lbl = lbl, page = page }
 	conn(b.Activated:Connect(function() selectTab(i) end))
 end
 
--- ═══ COMPONENTES ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  COMPONENTES
+-- ═════════════════════════════════════════════════════════════════════════════
 local orders = {}
-local function ord(page) orders[page] = (orders[page] or 0) + 1 return orders[page] end
+local function ord(page) orders[page] = (orders[page] or 0) + 1; return orders[page] end
 
 local function section(page, text)
 	local up = string.upper(text)
 	local f = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = ord(page), Active = false }, page)
 	new("TextLabel", {
-		Position = UDim2.fromOffset(2, 0), Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1,
-		Text = up, Font = F.bold, TextSize = 11, TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left, Active = false,
+		Position = UDim2.fromOffset(2, 0), Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1, Text = up, Font = F.bold, TextSize = 11, TextColor3 = C.muted,
+		TextXAlignment = Enum.TextXAlignment.Left, Active = false,
 	}, f)
 	local w = 60
 	pcall(function() w = TextService:GetTextSize(up, 11, F.bold, Vector2.new(1000, 26)).X end)
-	new("Frame", { Position = UDim2.new(0, w + 14, 0.5, 0), Size = UDim2.new(1, -(w + 14), 0, 1), BackgroundColor3 = C.line, BorderSizePixel = 0, Active = false }, f)
+	new("Frame", {
+		Position = UDim2.new(0, w + 14, 0.5, 0), Size = UDim2.new(1, -(w + 14), 0, 1),
+		BackgroundColor3 = C.line, BorderSizePixel = 0, Active = false,
+	}, f)
 end
 
 local function infoCard(page)
 	local l = new("TextLabel", {
 		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.card, Text = "…",
-		Font = F.reg, TextSize = 12, TextColor3 = C.muted, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-		TextYAlignment = Enum.TextYAlignment.Top, LayoutOrder = ord(page),
+		Font = F.reg, TextSize = 12, TextColor3 = C.muted, TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		LayoutOrder = ord(page),
 	}, page)
 	round(l, 12); stroke(l, C.line, 1, 0)
-	new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, l)
+	new("UIPadding", {
+		PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
+		PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12),
+	}, l)
 	return l
 end
 
 local function toggle(page, name, key, desc)
 	local h = desc and (ROW + 10) or ROW
-	local row = new("TextButton", { Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = C.card, Text = "", AutoButtonColor = false, LayoutOrder = ord(page) }, page)
+	local row = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = C.card, Text = "", AutoButtonColor = false,
+		LayoutOrder = ord(page),
+	}, page)
 	round(row, 12)
 	local rs = stroke(row, C.line, 1, 0)
 	new("TextLabel", {
-		Position = UDim2.fromOffset(14, desc and 9 or 0), Size = UDim2.new(1, -86, 0, desc and 20 or h), BackgroundTransparency = 1,
-		Text = name, Font = F.med, TextSize = 15, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd, Active = false,
+		Position = UDim2.fromOffset(14, desc and 9 or 0), Size = UDim2.new(1, -86, 0, desc and 20 or h),
+		BackgroundTransparency = 1, Text = name, Font = F.med, TextSize = 15, TextColor3 = C.text,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Active = false,
 	}, row)
 	if desc then
 		new("TextLabel", {
-			Position = UDim2.fromOffset(14, 31), Size = UDim2.new(1, -86, 0, 18), BackgroundTransparency = 1, Text = desc,
-			Font = F.reg, TextSize = 11, TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd, Active = false,
+			Position = UDim2.fromOffset(14, 31), Size = UDim2.new(1, -86, 0, 18), BackgroundTransparency = 1,
+			Text = desc, Font = F.reg, TextSize = 11, TextColor3 = C.muted,
+			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Active = false,
 		}, row)
 	end
-	local track = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Size = UDim2.fromOffset(48, 26), BackgroundColor3 = C.card2, BorderSizePixel = 0, Active = false }, row)
+	local track = new("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Size = UDim2.fromOffset(48, 26),
+		BackgroundColor3 = C.card2, BorderSizePixel = 0, Active = false,
+	}, row)
 	round(track, 13)
 	local ts = stroke(track, C.line2, 1, 0)
-	local knob = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), Size = UDim2.fromOffset(20, 20), BackgroundColor3 = C.muted, BorderSizePixel = 0, Active = false }, track)
+	local knob = new("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0),
+		Size = UDim2.fromOffset(20, 20), BackgroundColor3 = C.muted, BorderSizePixel = 0, Active = false,
+	}, track)
 	round(knob, 10)
 	local function render(instant)
 		local on, t = S[key], instant and 0 or 0.2
 		tw(track, { BackgroundColor3 = on and C.green or C.card2 }, t)
 		tw(ts, { Color = on and C.green or C.line2 }, t)
 		tw(rs, { Color = on and C.greenDim or C.line }, t)
-		tw(knob, { Position = on and UDim2.new(1, -23, 0.5, 0) or UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = on and C.bg or C.muted }, t, Enum.EasingStyle.Back)
+		tw(knob, {
+			Position = on and UDim2.new(1, -23, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
+			BackgroundColor3 = on and C.bg or C.muted,
+		}, t, Enum.EasingStyle.Back)
 	end
 	render(true)
 	refresh[key] = render
@@ -430,26 +518,36 @@ local function slider(page, name, key, mn, mx, suffix, step)
 	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 66), BackgroundColor3 = C.card, LayoutOrder = ord(page) }, page)
 	round(row, 12); stroke(row, C.line, 1, 0)
 	new("TextLabel", {
-		Position = UDim2.fromOffset(14, 9), Size = UDim2.new(1, -100, 0, 22), BackgroundTransparency = 1, Text = name,
-		Font = F.med, TextSize = 15, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd, Active = false,
+		Position = UDim2.fromOffset(14, 9), Size = UDim2.new(1, -100, 0, 22), BackgroundTransparency = 1,
+		Text = name, Font = F.med, TextSize = 15, TextColor3 = C.text,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Active = false,
 	}, row)
 	local chip = new("TextLabel", {
 		AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 9), Size = UDim2.fromOffset(70, 22),
-		BackgroundColor3 = C.greenDim, BackgroundTransparency = 0.55, Font = F.bold, TextSize = 13, TextColor3 = C.green, Active = false,
+		BackgroundColor3 = C.greenDim, BackgroundTransparency = 0.55, Font = F.bold, TextSize = 13,
+		TextColor3 = C.green, Active = false,
 	}, row)
 	round(chip, 7)
-	local track = new("Frame", { Position = UDim2.new(0, 14, 0, 47), Size = UDim2.new(1, -28, 0, 5), BackgroundColor3 = C.card2, BorderSizePixel = 0, Active = false }, row)
+	local track = new("Frame", {
+		Position = UDim2.new(0, 14, 0, 47), Size = UDim2.new(1, -28, 0, 5),
+		BackgroundColor3 = C.card2, BorderSizePixel = 0, Active = false,
+	}, row)
 	round(track, 3)
-	local fill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Active = false }, track)
+	local fill = new("Frame", {
+		Size = UDim2.fromScale(0, 1), BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0, Active = false,
+	}, track)
 	round(fill, 3); grad(fill, Color3.fromRGB(20, 190, 95), C.green, 0)
-	local knob = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(20, 20), BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = false }, track)
+	local knob = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5),
+		Size = UDim2.fromOffset(20, 20), BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = false,
+	}, track)
 	round(knob, 10); stroke(knob, C.green, 2, 0)
-	new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(6, 6), BackgroundColor3 = C.green, BorderSizePixel = 0, Active = false }, knob)
-		:FindFirstChildOfClass("UICorner") -- (sem efeito; o cantinho é criado abaixo)
-	for _, ch in ipairs(knob:GetChildren()) do
-		if ch:IsA("Frame") then round(ch, 3) end
-	end
+	local knobDot = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(6, 6), BackgroundColor3 = C.green, BorderSizePixel = 0, Active = false,
+	}, knob)
+	round(knobDot, 3)
 	local function render()
 		local a = (S[key] - mn) / (mx - mn)
 		fill.Size = UDim2.fromScale(a, 1)
@@ -488,11 +586,16 @@ end
 
 local function button(page, text, primary, fn, iconKind)
 	local b = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, ROW), BackgroundColor3 = primary and Color3.new(1, 1, 1) or C.card, Text = "",
-		AutoButtonColor = false, LayoutOrder = ord(page),
+		Size = UDim2.new(1, 0, 0, ROW),
+		BackgroundColor3 = primary and Color3.new(1, 1, 1) or C.card,
+		Text = "", AutoButtonColor = false, LayoutOrder = ord(page),
 	}, page)
 	round(b, 12)
-	if primary then grad(b, Color3.fromRGB(80, 255, 155), Color3.fromRGB(20, 200, 100), 90) else stroke(b, C.green, 1, 0.55) end
+	if primary then
+		grad(b, Color3.fromRGB(80, 255, 155), Color3.fromRGB(20, 200, 100), 90)
+	else
+		stroke(b, C.green, 1, 0.55)
+	end
 	local col = primary and C.bg or C.green
 	local content = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = false }, b)
 	new("UIListLayout", {
@@ -504,20 +607,20 @@ local function button(page, text, primary, fn, iconKind)
 		ic.root.LayoutOrder = 1
 	end
 	new("TextLabel", {
-		Size = UDim2.fromOffset(0, 18), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = text,
-		Font = F.bold, TextSize = 15, TextColor3 = col, LayoutOrder = 2, Active = false,
+		Size = UDim2.fromOffset(0, 18), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1,
+		Text = text, Font = F.bold, TextSize = 15, TextColor3 = col, LayoutOrder = 2, Active = false,
 	}, content)
 	pressScale(b)
 	conn(b.Activated:Connect(fn))
 end
 
--- Aviso (toast) embaixo, no centro: longe do joystick e do botão de pulo
 local toastObj
 local function toast(msg)
 	if toastObj then toastObj:Destroy() end
 	local g = new("CanvasGroup", {
-		AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -4), Size = UDim2.fromOffset(0, 40),
-		AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = C.card, GroupTransparency = 1, Active = false, ZIndex = 50,
+		AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -4),
+		Size = UDim2.fromOffset(0, 40), AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = C.card, GroupTransparency = 1, Active = false, ZIndex = 50,
 	}, gui)
 	round(g, 20); stroke(g, C.green, 1, 0.45)
 	local inner = new("Frame", { Size = UDim2.fromOffset(0, 40), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Active = false }, g)
@@ -529,8 +632,8 @@ local function toast(msg)
 	local d = new("Frame", { Size = UDim2.fromOffset(8, 8), BackgroundColor3 = C.green, BorderSizePixel = 0, LayoutOrder = 1, Active = false }, inner)
 	round(d, 99)
 	new("TextLabel", {
-		Size = UDim2.fromOffset(0, 40), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = msg,
-		Font = F.bold, TextSize = 14, TextColor3 = C.text, LayoutOrder = 2, Active = false,
+		Size = UDim2.fromOffset(0, 40), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1,
+		Text = msg, Font = F.bold, TextSize = 14, TextColor3 = C.text, LayoutOrder = 2, Active = false,
 	}, inner)
 	toastObj = g
 	tw(g, { GroupTransparency = 0, Position = UDim2.new(0.5, 0, 1, -16) }, 0.25, Enum.EasingStyle.Back)
@@ -542,9 +645,9 @@ local function toast(msg)
 	end)
 end
 
--- ═══════════════════════════════════════════════════════════════════════════
--- ESTADO E SELEÇÃO PERSISTENTE
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═════════════════════════════════════════════════════════════════════════════
+--  ESTADO
+-- ═════════════════════════════════════════════════════════════════════════════
 local target = nil
 local outTime, blockTime = 0, 0
 local lastSwitch = -1e9
@@ -552,12 +655,15 @@ local holdOff = 0
 local pick = false
 local dropped = {}
 local ctx = { camPos = Vector3.zero, now = 0, cam = nil, center = Vector2.zero }
-local stats = { players = 0, noChar = 0, dead = 0, ally = 0, noPart = 0, valid = 0, inRange = 0, inCircle = 0, blocked = 0 }
+local stats = {
+	players = 0, noChar = 0, dead = 0, ally = 0, noPart = 0, valid = 0,
+	inRange = 0, inCircle = 0, blocked = 0,
+}
 
--- Trava de câmera: guarda a PRÓPRIA rotação (funciona com câmera Custom e Scriptable)
-local Lock = { weight = 0, aim = nil, rot = nil, final = nil, active = false }
+local Lock = { weight = 0, aim = nil, aimSlow = nil, rot = nil, final = nil, active = false }
+
 local function resetLock()
-	Lock.weight, Lock.aim, Lock.rot, Lock.final, Lock.active = 0, nil, nil, nil, false
+	Lock.weight, Lock.aim, Lock.aimSlow, Lock.rot, Lock.final, Lock.active = 0, nil, nil, nil, nil, false
 end
 
 local rayParams = RaycastParams.new()
@@ -565,7 +671,9 @@ rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.RespectCanCollide = true
 local rayBase = {}
 
--- ─── Esqueleto ───────────────────────────────────────────────────────────────
+-- ═════════════════════════════════════════════════════════════════════════════
+--  ESQUELETO
+-- ═════════════════════════════════════════════════════════════════════════════
 local SKEL_KEYS = { "head", "torso", "root", "armL", "armR", "legL", "legR" }
 local CORE_KEYS = { "torso", "root", "head" }
 local SKEL_NAMES = {
@@ -579,13 +687,12 @@ local SKEL_NAMES = {
 }
 local skelCache = {}
 
---- Resolve as partes do corpo (R15 e R6) e guarda por 1 s; revalida se alguma sumir.
 local function getSkeleton(m)
 	local sk = skelCache[m]
-	if sk and ctx.now - sk.t < 1 then
+	if sk and ctx.now - sk.t < TUNING.SkelCacheTime then
 		local ok = true
 		for _, p in pairs(sk.parts) do
-			if not p.Parent then ok = false break end
+			if not p.Parent then ok = false; break end
 		end
 		if ok then return sk end
 	end
@@ -593,7 +700,7 @@ local function getSkeleton(m)
 	for key, names in pairs(SKEL_NAMES) do
 		for _, n in ipairs(names) do
 			local p = m:FindFirstChild(n)
-			if p and p:IsA("BasePart") then parts[key] = p break end
+			if p and p:IsA("BasePart") then parts[key] = p; break end
 		end
 	end
 	if not (parts.root or parts.torso or parts.head) then
@@ -615,8 +722,9 @@ local function setTarget(en, now)
 	end
 end
 
---- Há cenário sólido entre a câmera e o ponto? Partes quase invisíveis (>= 0.9) são ignoradas.
---- Personagens NÃO bloqueiam (rayBase os exclui): alguém passando na frente não derruba a trava.
+-- ═════════════════════════════════════════════════════════════════════════════
+--  VISIBILIDADE
+-- ═════════════════════════════════════════════════════════════════════════════
 local function lineBlockedTo(pos)
 	local filter = table.clone(rayBase)
 	rayParams.FilterDescendantsInstances = filter
@@ -632,40 +740,34 @@ local function lineBlockedTo(pos)
 	return true
 end
 
-local function partVisible(en, key)
+local function partVisible(en, key, cacheTime)
 	local part = en.sk.parts[key]
 	if not part then return false end
 	local c = en.sk.vis[key]
-	if c and ctx.now - c.t < TUNING.LosInterval then return c.ok end
+	local tt = cacheTime or TUNING.VisCacheCore
+	if c and ctx.now - c.t < tt then return c.ok end
 	local ok = not lineBlockedTo(part.Position)
 	if c then c.t, c.ok = ctx.now, ok else en.sk.vis[key] = { t = ctx.now, ok = ok } end
 	return ok
 end
 
---- Visível por tronco/raiz/cabeça (usado para ESCOLHER o alvo: precisão).
 local function visibleCore(en)
 	if not S.WallCheck then return true end
-	if en.visC ~= nil then return en.visC end
-	en.visC = false
 	for _, k in ipairs(CORE_KEYS) do
-		if partVisible(en, k) then en.visC = true break end
+		if partVisible(en, k, TUNING.VisCacheCore) then return true end
 	end
-	return en.visC
+	return false
 end
 
---- Visível por QUALQUER parte do esqueleto (usado para MANTER o alvo: persistência).
 local function visibleAny(en)
 	if not S.WallCheck then return true end
-	if en.visA ~= nil then return en.visA end
-	en.visA = false
-	for _, k in ipairs(S.SkelPersist and SKEL_KEYS or CORE_KEYS) do
-		if partVisible(en, k) then en.visA = true break end
+	local keys = S.SkelPersist and SKEL_KEYS or CORE_KEYS
+	for _, k in ipairs(keys) do
+		if partVisible(en, k, TUNING.VisCacheAny) then return true end
 	end
-	return en.visA
+	return false
 end
 
---- Menor distância (px) ao centro entre as partes do esqueleto: o alvo só é "perdido"
---- quando TODAS as partes saem do círculo + tolerância.
 local function keepDistance(en)
 	if not S.SkelPersist then return en.sd end
 	local best = en.sd
@@ -686,8 +788,19 @@ local function eligible(en, r)
 	return en.sd <= r and en.dist <= S.MaxDist and visibleCore(en)
 end
 
+-- ═══ Score de seleção (v2.5: balanceado) ═════════════════════════════════════
+--  Menor score vence. Combina ângulo, distância e visibilidade.
+--  Enquanto o alvo atual estiver vivo e dentro do círculo, mantém.
+local function scoreOf(en)
+	local angTerm = en.ang * 1.0
+	local distTerm = en.dist * 0.03  -- cada 100 studs = 3 graus equivalentes
+	local visTerm = (S.WallCheck and not visibleCore(en)) and 30 or 0
+	return angTerm + distTerm + visTerm
+end
+
 local function better(a, b)
-	if math.abs(a.ang - b.ang) > TUNING.TieDeg then return a.ang < b.ang end
+	local sa, sb = scoreOf(a), scoreOf(b)
+	if math.abs(sa - sb) > TUNING.TieDeg then return sa < sb end
 	return a.dist < b.dist
 end
 
@@ -702,19 +815,22 @@ local function pickBest(list, r, exclude, voluntary, now)
 	return best
 end
 
+-- ═════════════════════════════════════════════════════════════════════════════
+--  SELEÇÃO
+-- ═════════════════════════════════════════════════════════════════════════════
 local function selectTarget(list, byModel, r, dt, now)
 	local cur = target and byModel[target] or nil
 	local forced = false
 
 	if target then
 		if not cur then
-			forced = true -- morreu, saiu, perdeu personagem, virou aliado ou ficou inválido
+			forced = true
 		elseif cur.dist > S.MaxDist * TUNING.RangeMargin then
-			forced = true -- passou da distância máxima
+			forced = true
 		else
 			cur.sdKeep = keepDistance(cur)
 			cur.blocked = S.WallCheck and not visibleAny(cur)
-			blockTime = cur.blocked and (blockTime + dt) or 0 -- volta a ficar visível → zera
+			blockTime = cur.blocked and (blockTime + dt) or 0
 			outTime = (cur.sdKeep > r + S.Tol) and (outTime + dt) or 0
 			if blockTime > S.ObstructTol or outTime > TUNING.OutGrace then forced = true end
 		end
@@ -730,8 +846,8 @@ local function selectTarget(list, byModel, r, dt, now)
 			if penalty > 0 then
 				local best = pickBest(list, r, target, true, now)
 				if best then
-					local curEff = cur.ang + penalty
-					if best.ang <= curEff * (1 - S.AdvPct / 100) and (curEff - best.ang) >= TUNING.AbsAdvDeg then
+					local curEff = scoreOf(cur) + penalty
+					if scoreOf(best) <= curEff * (1 - S.AdvPct / 100) and (curEff - scoreOf(best)) >= TUNING.AbsAdvDeg then
 						setTarget(best, now)
 						cur = best
 					end
@@ -757,9 +873,9 @@ local function selectTarget(list, byModel, r, dt, now)
 	return cur
 end
 
--- ─── Ponto de mira por esqueleto ────────────────────────────────────────────────
--- Mistura CONTÍNUA (sem troca brusca): tronco ↔ cabeça (slider) e, se ambos estiverem
--- ocultos, a primeira parte visível. Os pesos são suavizados, então a câmera não salta.
+-- ═════════════════════════════════════════════════════════════════════════════
+--  PONTO DE MIRA (v2.5: filtro duplo + predição + snap)
+-- ═════════════════════════════════════════════════════════════════════════════
 local Aim = { model = nil, wH = 0, wT = 1, wO = 0, key = nil }
 
 local function aimWeights(en)
@@ -767,6 +883,13 @@ local function aimWeights(en)
 	local head = parts.head
 	local tKey = parts.torso and "torso" or (parts.root and "root" or nil)
 	local bias = S.AimBias / 100
+
+	-- Auto-bias por distância (v2.5): longe prioriza tronco, perto prioriza cabeça
+	if S.AutoSnap then
+		local distBias = math.clamp(1 - (en.dist - 20) / 60, 0, 1) -- 20 studs=1, 80 studs=0
+		bias = math.max(bias, distBias * 0.95)
+	end
+
 	local hv = head ~= nil and (not S.WallCheck or partVisible(en, "head"))
 	local tv = tKey ~= nil and (not S.WallCheck or partVisible(en, tKey))
 	if hv and tv then return bias, 1 - bias, 0, nil end
@@ -775,7 +898,7 @@ local function aimWeights(en)
 	for _, k in ipairs(SKEL_KEYS) do
 		if parts[k] and partVisible(en, k) then return 0, 0, 1, k end
 	end
-	return nil -- nada visível: mantém os pesos atuais (a trava continua na última mira)
+	return nil
 end
 
 local function updateAimPoint(en, dt)
@@ -798,6 +921,25 @@ local function updateAimPoint(en, dt)
 	local pT = (parts.torso or parts.root or parts.head).Position
 	local pH = parts.head and parts.head.Position or pT
 	local pO = (Aim.key and parts[Aim.key]) and parts[Aim.key].Position or pT
+
+	-- Predição (v2.5): usar velocity do HRP para anticipar movimento
+	if S.Predict then
+		local hrp = parts.root or parts.torso or parts.head
+		if hrp then
+			local vel = hrp.AssemblyLinearVelocity
+			if vel.Magnitude > 1 then
+				local camPos = ctx.camPos
+				local basePos = (pH * Aim.wH + pT * Aim.wT + pO * Aim.wO) / math.max(Aim.wH + Aim.wT + Aim.wO, 1e-3)
+				local dist = (basePos - camPos).Magnitude
+				local travelTime = math.min(dist / math.max(S.PredictSpeed, 1), S.PredictMaxLead)
+				local lead = vel * travelTime
+				pH = pH + lead
+				pT = pT + lead
+				pO = pO + lead
+			end
+		end
+	end
+
 	local sum = Aim.wH + Aim.wT + Aim.wO
 	if sum < 1e-3 then
 		en.aim = pT
@@ -806,7 +948,9 @@ local function updateAimPoint(en, dt)
 	end
 end
 
--- ═══ AÇÕES ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  AÇÕES
+-- ═════════════════════════════════════════════════════════════════════════════
 local actions = {}
 function actions.pick() pick = true end
 function actions.release()
@@ -815,7 +959,9 @@ function actions.release()
 	toast("Alvo solto")
 end
 
--- ═══ ABAS ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  ABAS (conteúdo)
+-- ═════════════════════════════════════════════════════════════════════════════
 local pMira, pEsp, pFiltros, pConfig = tabs[1].page, tabs[2].page, tabs[3].page, tabs[4].page
 
 section(pMira, "Diagnóstico")
@@ -829,8 +975,13 @@ section(pMira, "Círculo e câmera")
 slider(pMira, "Tamanho do círculo", "Radius", 8, 48, "%")
 slider(pMira, "Suavidade da câmera", "Smooth", 0, 95, "%", 5)
 slider(pMira, "Tolerância de saída", "Tol", 0, 80, " px", 4)
-section(pMira, "Esqueleto")
+section(pMira, "Mira precisa")
 slider(pMira, "Ponto de mira (tronco ↔ cabeça)", "AimBias", 0, 100, "%", 5)
+toggle(pMira, "Snap automático na cabeça", "AutoSnap", "Em curta distância mira na cabeça")
+slider(pMira, "Alcance do snap", "SnapRange", 3, 25, " st", 1)
+toggle(pMira, "Predição de movimento", "Predict", "Antecipa onde o alvo vai estar")
+slider(pMira, "Velocidade da bala", "PredictSpeed", 100, 2000, " st/s", 50)
+slider(pMira, "Lead máximo", "PredictMaxLead", 0.05, 1, " s", 0.05)
 toggle(pMira, "Persistência por esqueleto", "SkelPersist", "Qualquer parte no círculo mantém o alvo")
 section(pMira, "Alvo")
 button(pMira, "Selecionar alvo no círculo", true, actions.pick, "target")
@@ -870,7 +1021,9 @@ end, "reset")
 
 selectTab(1, true)
 
--- ═══ MINIMIZAR / FECHAR ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  MINIMIZAR / FECHAR
+-- ═════════════════════════════════════════════════════════════════════════════
 local float = new("TextButton", {
 	AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(54, 54), Position = UDim2.fromOffset(38, 64),
 	BackgroundColor3 = C.bg, Text = "", AutoButtonColor = false, Visible = false,
@@ -909,7 +1062,7 @@ local function shutdown()
 end
 local armed = false
 conn(closeBtn.Activated:Connect(function()
-	if armed then shutdown() return end
+	if armed then shutdown(); return end
 	armed = true
 	toast("Toque em × novamente para fechar")
 	task.delay(2.2, function() armed = false end)
@@ -918,11 +1071,14 @@ conn(UIS.InputBegan:Connect(function(i, gp)
 	if not gp and i.KeyCode == Enum.KeyCode.RightControl then setShown(not shown) end
 end))
 
--- ═══ BOTÕES NA TELA (LOCK / ALVO) ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  BOTÕES HUD
+-- ═════════════════════════════════════════════════════════════════════════════
 local function hudBtn(kind, text, y, fn)
 	local b = new("TextButton", {
-		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(vp0.X - 52, y), Size = UDim2.fromOffset(64, 64),
-		BackgroundColor3 = C.bg, BackgroundTransparency = 0.1, Text = "", AutoButtonColor = false, Visible = S.Hud,
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(vp0.X - 52, y),
+		Size = UDim2.fromOffset(64, 64), BackgroundColor3 = C.bg, BackgroundTransparency = 0.1,
+		Text = "", AutoButtonColor = false, Visible = S.Hud,
 	}, gui)
 	round(b, 32)
 	local st = stroke(b, C.muted, 2, 0.3)
@@ -930,8 +1086,8 @@ local function hudBtn(kind, text, y, fn)
 	ic.root.AnchorPoint = Vector2.new(0.5, 0)
 	ic.root.Position = UDim2.new(0.5, 0, 0, 11)
 	local lbl = new("TextLabel", {
-		Position = UDim2.new(0, 0, 1, -23), Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Text = text,
-		Font = F.bold, TextSize = 10, TextColor3 = C.muted, Active = false,
+		Position = UDim2.new(0, 0, 1, -23), Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+		Text = text, Font = F.bold, TextSize = 10, TextColor3 = C.muted, Active = false,
 	}, b)
 	local sc = pressScale(b)
 	drag(b, b, fn)
@@ -957,15 +1113,12 @@ conn(gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 		o.Position = UDim2.fromOffset(o.Position.X.Offset * rx, o.Position.Y.Offset * ry)
 		clampToScreen(o)
 	end
-	selectTab(table.find(tabs, (function()
-		for _, t in ipairs(tabs) do if t.page.Visible then return t end end
-		return tabs[1]
-	end)()) or 1, true)
+	selectTab(activeTabIndex, true)
 end))
 
--- ═══ PERSONAGENS VÁLIDOS ═══
--- Alguns jogos não preenchem Player.Character na partida (personagem customizado).
--- Fallback: procura um Model com o nome do jogador (1x por segundo, escalonado).
+-- ═════════════════════════════════════════════════════════════════════════════
+--  PERSONAGENS
+-- ═════════════════════════════════════════════════════════════════════════════
 local charCache = {}
 local function characterOf(p)
 	local c = p.Character
@@ -989,7 +1142,6 @@ local function characterOf(p)
 end
 conn(Players.PlayerRemoving:Connect(function(p) charCache[p] = nil end))
 
--- Revalidado TODO frame: vivo, esqueleto resolvido, não é você e não é aliado.
 local function listTargets()
 	local out, seen = {}, {}
 	stats.players, stats.noChar, stats.dead, stats.ally, stats.noPart, stats.valid = 0, 0, 0, 0, 0, 0
@@ -997,12 +1149,12 @@ local function listTargets()
 		if seen[m] or m == lp.Character or not m.Parent then return end
 		seen[m] = true
 		local hum = m:FindFirstChildOfClass("Humanoid")
-		if not hum then stats.noPart += 1 return end
+		if not hum then stats.noPart += 1; return end
 		local sk = getSkeleton(m)
 		local anchor = sk.parts.root or sk.parts.torso or sk.parts.head
-		if not anchor then stats.noPart += 1 return end
-		if hum.Health <= 0 then stats.dead += 1 return end
-		if S.Team and p and lp.Team and p.Team == lp.Team then stats.ally += 1 return end
+		if not anchor then stats.noPart += 1; return end
+		if hum.Health <= 0 then stats.dead += 1; return end
+		if S.Team and p and lp.Team and p.Team == lp.Team then stats.ally += 1; return end
 		out[#out + 1] = { m = m, hum = hum, hrp = anchor, sk = sk, player = p }
 	end
 	for _, p in ipairs(Players:GetPlayers()) do
@@ -1019,7 +1171,9 @@ local function listTargets()
 	return out
 end
 
--- ═══ ESP ═══
+-- ═════════════════════════════════════════════════════════════════════════════
+--  ESP
+-- ═════════════════════════════════════════════════════════════════════════════
 local esp = {}
 local function espFor(m)
 	local e = esp[m]
@@ -1032,11 +1186,19 @@ local function espFor(m)
 			Font = F.bold, TextSize = 13, TextStrokeTransparency = 0.45, Active = false,
 		}, holder)
 	end
-	local hb = new("Frame", { AnchorPoint = Vector2.new(1, 0), BackgroundColor3 = C.bg, BackgroundTransparency = 0.3, BorderSizePixel = 0, Active = false }, holder)
-	local hf = new("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), BackgroundColor3 = C.green, BorderSizePixel = 0, Active = false }, hb)
+	local hb = new("Frame", {
+		AnchorPoint = Vector2.new(1, 0), BackgroundColor3 = C.bg, BackgroundTransparency = 0.3,
+		BorderSizePixel = 0, Active = false,
+	}, holder)
+	local hf = new("Frame", {
+		AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1),
+		BackgroundColor3 = C.green, BorderSizePixel = 0, Active = false,
+	}, hb)
 	e = {
-		holder = holder, box = box, st = stroke(box, C.text, 1.5, 0), nm = label(1), ds = label(0), hb = hb, hf = hf,
-		tr = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, Active = false }, holder), nmText = "", dsText = "",
+		holder = holder, box = box, st = stroke(box, C.text, 1.5, 0),
+		nm = label(1), ds = label(0), hb = hb, hf = hf,
+		tr = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, Active = false }, holder),
+		nmText = "", dsText = "",
 	}
 	esp[m] = e
 	return e
@@ -1111,11 +1273,9 @@ local function drawEsp(cam, list)
 	end
 end
 
--- ═══ TRAVA DE CÂMERA ═══
--- Mantém uma rotação PRÓPRIA (Lock.rot) que persegue o ponto de mira com suavização
--- exponencial (independente de FPS, com limite de velocidade angular). O resultado final
--- mistura a rotação que a câmera do jogo produziu neste frame com a nossa, por um "peso"
--- com easing: entrar e soltar a trava nunca causa puxão. Funciona com câmera Custom e Scriptable.
+-- ═════════════════════════════════════════════════════════════════════════════
+--  TRAVA DE CÂMERA
+-- ═════════════════════════════════════════════════════════════════════════════
 local MAX_TURN = math.rad(540)
 
 local function updateCameraLock(cam, dt, cur)
@@ -1123,15 +1283,21 @@ local function updateCameraLock(cam, dt, cur)
 	local alive = not (hum and hum.Health <= 0)
 	local want = alive and S.Lock and cur ~= nil
 
-	if want then Lock.weight = math.min(1, Lock.weight + dt / 0.35)
-	else Lock.weight = math.max(0, Lock.weight - dt / 0.25) end
+	if want then
+		Lock.weight = math.min(1, Lock.weight + dt / 0.35)
+	else
+		Lock.weight = math.max(0, Lock.weight - dt / 0.25)
+	end
 
 	if want then
 		local p = cur.aim or cur.hrp.Position
+		-- 1º filtro: reduz tremor de curto prazo
 		Lock.aim = Lock.aim and Lock.aim:Lerp(p, 1 - math.exp(-TUNING.AimFilter * dt)) or p
+		-- 2º filtro: reduz lag e suaviza ainda mais
+		Lock.aimSlow = Lock.aimSlow and Lock.aimSlow:Lerp(Lock.aim, 1 - math.exp(-TUNING.AimFilterSlow * dt)) or Lock.aim
 	end
 
-	if Lock.weight <= 0 or not Lock.aim then
+	if Lock.weight <= 0 or not Lock.aimSlow then
 		resetLock()
 		return
 	end
@@ -1140,10 +1306,10 @@ local function updateCameraLock(cam, dt, cur)
 	local pos = base.Position
 	if not Lock.rot then Lock.rot = base.Rotation end
 
-	local off = Lock.aim - pos
+	local off = Lock.aimSlow - pos
 	if off.Magnitude > 1 then
 		local d = off.Unit
-		if math.abs(d.Y) > 0.94 then -- limita a inclinação (~70°)
+		if math.abs(d.Y) > 0.94 then
 			local flat = Vector3.new(d.X, 0, d.Z)
 			if flat.Magnitude < 1e-3 then
 				d = nil
@@ -1161,14 +1327,18 @@ local function updateCameraLock(cam, dt, cur)
 		end
 	end
 
-	local e = Lock.weight * Lock.weight * (3 - 2 * Lock.weight) -- smoothstep
+	local e = Lock.weight * Lock.weight * (3 - 2 * Lock.weight)
 	Lock.final = base.Rotation:Lerp(Lock.rot, e)
 	Lock.active = true
 	cam.CFrame = CFrame.new(pos) * Lock.final
 end
 
--- ═══ LOOP PRINCIPAL ═══
-local cache = { sub = "", lock = -1, tgt = -1, scale = -1, diagT = 0, mode = "" }
+-- ═════════════════════════════════════════════════════════════════════════════
+--  LOOP PRINCIPAL
+-- ═════════════════════════════════════════════════════════════════════════════
+local cache = {
+	sub = "", lock = -1, tgt = -1, scale = -1, diagT = 0, mode = "",
+}
 
 local function update(dt)
 	local cam = WS.CurrentCamera
@@ -1194,12 +1364,12 @@ local function update(dt)
 	stats.inRange, stats.inCircle, stats.blocked = 0, 0, 0
 	table.clear(rayBase)
 	if lp.Character then rayBase[1] = lp.Character end
+
 	local bias = S.AimBias / 100
 	for _, en in ipairs(list) do
 		local parts = en.sk.parts
 		local torsoPart = parts.torso or parts.root or parts.head
 		local headPart = parts.head or torsoPart
-		-- âncora de seleção: tronco ↔ cabeça pelo slider (estável e precisa)
 		local anchor = torsoPart.Position:Lerp(headPart.Position, bias)
 		local off = anchor - camPos
 		local dist = off.Magnitude
@@ -1219,6 +1389,7 @@ local function update(dt)
 			end
 		end
 	end
+
 	for m in pairs(skelCache) do if not byModel[m] then skelCache[m] = nil end end
 	for m, t in pairs(dropped) do
 		if now - t > 10 or not byModel[m] then dropped[m] = nil end
@@ -1236,10 +1407,9 @@ local function update(dt)
 	updateCameraLock(cam, dt, cur)
 	drawEsp(cam, list)
 
-	-- Marcador do ponto de mira (onde a câmera realmente está mirando)
 	local showDot = false
-	if S.AimDot and S.Enabled and cur and Lock.aim then
-		local v = cam:WorldToViewportPoint(Lock.aim)
+	if S.AimDot and S.Enabled and cur and Lock.aimSlow then
+		local v = cam:WorldToViewportPoint(Lock.aimSlow)
 		if v.Z > 0 then
 			UI.aimDot.Position = UDim2.fromOffset(v.X, v.Y)
 			showDot = true
@@ -1247,7 +1417,6 @@ local function update(dt)
 	end
 	UI.aimDot.Visible = showDot
 
-	-- Status do cabeçalho (ponto colorido + pulso quando travado)
 	local text, col, pulse
 	if not S.Enabled then
 		text, col, pulse = "Desligado", C.muted, false
@@ -1271,22 +1440,23 @@ local function update(dt)
 		UI.pulse.Visible = pulse
 	end
 
-	-- Diagnóstico (4x por segundo)
 	if now - cache.diagT > 0.25 then
 		cache.diagT = now
 		local sum = Aim.wH + Aim.wT + Aim.wO
 		local mira = "—"
 		if cur and sum > 1e-3 then
-			mira = string.format("cabeça %d%% · tronco %d%%%s", Aim.wH / sum * 100, Aim.wT / sum * 100,
+			mira = string.format("cabeça %d%% · tronco %d%%%s",
+				Aim.wH / sum * 100, Aim.wT / sum * 100,
 				Aim.wO / sum > 0.05 and (" · " .. (Aim.key or "?")) or "")
 		end
 		diagLabel.Text = string.format(
-			"Jogadores: %d · válidos: %d\nAliados ignorados: %d · sem personagem: %d · mortos: %d · sem parte: %d\nNo alcance: %d · no círculo: %d · bloqueados: %d\nCâmera: %s · alvo: %s\nMira: %s",
+			"Jogadores: %d · válidos: %d\nAliados ignorados: %d · sem personagem: %d · mortos: %d · sem parte: %d\nNo alcance: %d · no círculo: %d · bloqueados: %d\nCâmera: %s · alvo: %s\nMira: %s · predição: %s",
 			stats.players, stats.valid, stats.ally, stats.noChar, stats.dead, stats.noPart,
-			stats.inRange, stats.inCircle, stats.blocked, cam.CameraType.Name, target and target.Name or "nenhum", mira)
+			stats.inRange, stats.inCircle, stats.blocked,
+			cam.CameraType.Name, target and target.Name or "nenhum", mira,
+			S.Predict and "ON" or "OFF")
 	end
 
-	-- Botões na tela
 	hudLock.btn.Visible = S.Hud
 	hudTarget.btn.Visible = S.Hud and not S.Auto
 	if cache.scale ~= S.HudScale then
@@ -1314,15 +1484,11 @@ local function update(dt)
 	end
 end
 
--- Roda no ÚLTIMO passo de renderização: depois da câmera padrão e de câmeras da partida
--- ligadas por BindToRenderStep.
 RunService:BindToRenderStep(STEP, Enum.RenderPriority.Last.Value, function(dt)
 	local ok, err = pcall(update, dt)
 	if not ok then warn("[Obsidian] " .. tostring(err)) end
 end)
 
--- Reaplica a rotação da trava em RenderStepped: se uma câmera da partida escrever
--- DEPOIS do passo acima, a trava não é apagada (funciona em qualquer ordem).
 conn(RunService.RenderStepped:Connect(function()
 	local cam = WS.CurrentCamera
 	if cam and Lock.active and Lock.final then
@@ -1330,7 +1496,6 @@ conn(RunService.RenderStepped:Connect(function()
 	end
 end))
 
--- ═══ EVENTOS: transição lobby → partida, respawn, equipe, câmera ═══
 conn(lp.CharacterAdded:Connect(function()
 	resetLock()
 	setTarget(nil, os.clock())
@@ -1340,9 +1505,9 @@ conn(lp.CharacterRemoving:Connect(function()
 	setTarget(nil, os.clock())
 end))
 conn(lp:GetPropertyChangedSignal("Team"):Connect(function()
-	setTarget(nil, os.clock()) -- revalida equipes do zero
+	setTarget(nil, os.clock())
 end))
 conn(WS:GetPropertyChangedSignal("CurrentCamera"):Connect(resetLock))
 
 tw(UI.winScale, { Scale = 1 }, 0.4, Enum.EasingStyle.Back)
-toast("OBSIDIAN carregado")
+toast("OBSIDIAN v2.5 carregado")
